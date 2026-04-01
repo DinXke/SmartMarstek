@@ -70,17 +70,34 @@ def main():
         )
 
     # ── InfluxDB connection ───────────────────────────────────────────────
-    influx_url = (opts.get("influx_url") or "").strip()
-    if influx_url:
+    # Option 1: auto-discovered HA InfluxDB add-on (run.sh sets INFLUX_ADDON_*)
+    addon_host = os.environ.get("INFLUX_ADDON_HOST", "").strip()
+    addon_port = os.environ.get("INFLUX_ADDON_PORT", "8086").strip()
+    addon_ssl  = os.environ.get("INFLUX_ADDON_SSL",  "false").strip().lower() == "true"
+    if addon_host:
+        scheme = "https" if addon_ssl else "http"
         write_if_changed(
             os.path.join(DATA_DIR, "influx_connection.json"),
             {
-                "url":      influx_url,
+                "url":      f"{scheme}://{addon_host}:{addon_port}",
                 "version":  (opts.get("influx_version")  or "v1").strip(),
-                "username": (opts.get("influx_username") or "").strip(),
-                "password": (opts.get("influx_password") or "").strip(),
+                "username": os.environ.get("INFLUX_ADDON_USERNAME", "").strip(),
+                "password": os.environ.get("INFLUX_ADDON_PASSWORD", "").strip(),
             },
         )
+    # Option 2: manually entered URL
+    else:
+        influx_url = (opts.get("influx_url") or "").strip()
+        if influx_url:
+            write_if_changed(
+                os.path.join(DATA_DIR, "influx_connection.json"),
+                {
+                    "url":      influx_url,
+                    "version":  (opts.get("influx_version")  or "v1").strip(),
+                    "username": (opts.get("influx_username") or "").strip(),
+                    "password": (opts.get("influx_password") or "").strip(),
+                },
+            )
 
     print("[setup_config] Done", flush=True)
 

@@ -42,6 +42,10 @@ options:
   timezone: "Europe/Brussels"
 
   # ── InfluxDB (optional – for consumption history) ─────────────────────────
+  # Set influx_use_ha_addon: true to auto-discover the HA InfluxDB add-on via
+  # the Supervisor (no URL/credentials needed).
+  # Set to false and fill in influx_url to connect to an external InfluxDB.
+  influx_use_ha_addon: false
   influx_url: ""
   influx_version: "v1"
   influx_username: ""
@@ -56,6 +60,7 @@ schema:
   entsoe_api_key: str?
   entsoe_country: str?
   timezone: str?
+  influx_use_ha_addon: bool?
   influx_url: str?
   influx_version: list(v1|v2)?
   influx_username: str?
