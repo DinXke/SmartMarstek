@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0] - 2026-04-01
+
+### Fixed
+- InfluxDB v1 Basic Auth encoding error: `'latin-1' codec can't encode characters`
+  — credentials are now encoded as UTF-8 + base64 instead of relying on
+  `requests`' default latin-1 path
+
 ## [1.1.0] - 2026-04-01
 
 ### Added
