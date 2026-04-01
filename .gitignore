@@ -1,0 +1,50 @@
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ───────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env
+
+# ── Node / Frontend ────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+
+# ── Sensitive config files (contain tokens, passwords, IP addresses) ───────
+backend/ha_settings.json
+backend/entsoe_settings.json
+backend/forecast_settings.json
+backend/frank_session.json
+backend/influx_connection.json
+backend/devices.json
+backend/homewizard_devices.json
+
+# ── Runtime / state files (user-specific, change constantly) ───────────────
+backend/flow_cfg.json
+backend/strategy_settings.json
+backend/influx_source.json
+backend/automation.json
+backend/marstek.log
+backend/energy.db
+backend/*.db
+
+# ── OS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE / Claude Code ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/

@@ -1,0 +1,2580 @@
+import ipaddress
+import json
+import logging
+import os
+import socket
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlencode, quote
+from urllib.request import urlopen, Request
+from urllib.error import URLError
+
+from influx_writer import (start_background_writer, query_avg_hourly_consumption,
+                           query_recent_points, query_day_actuals)
+from strategy import (load_strategy_settings, save_strategy_settings,
+                      build_plan, split_days)
+
+import requests as _req  # aliased to avoid clash with flask.request
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  # v2 uses self-signed cert
+from flask import Flask, Response, jsonify, request, send_from_directory, abort, stream_with_context
+from flask_cors import CORS
+
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "marstek.log")
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),                         # stdout (visible in terminal)
+        logging.FileHandler(LOG_FILE, encoding="utf-8"), # persistent log file
+    ],
+)
+log = logging.getLogger("marstek")
+
+app = Flask(__name__, static_folder=None)
+CORS(app)
+
+
+@app.before_request
+def _log_request():
+    if request.path.startswith("/api/"):
+        log.debug("→ %s %s  args=%s", request.method, request.path, dict(request.args))
+
+# ---------------------------------------------------------------------------
+# Device storage
+# ---------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(BASE_DIR, "devices.json")
+FRONTEND_DIST = os.path.join(BASE_DIR, "..", "frontend", "dist")
+
+
+def load_devices() -> dict:
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_devices(devices: dict) -> None:
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(devices, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# ESPHome helpers
+# ---------------------------------------------------------------------------
+
+def send_esphome_command(ip: str, port: int, domain: str, name: str, value: str) -> dict:
+    """
+    Send a command to an ESPHome entity identified by its friendly name.
+    ESPHome web server v3 uses the entity name (URL-encoded) in REST paths:
+      SELECT  → POST /select/{name}/set?option={value}
+      NUMBER  → POST /number/{name}/set?value={value}
+    """
+    encoded_name = quote(name, safe="")
+
+    if domain == "select":
+        path = f"/select/{encoded_name}/set"
+        params = urlencode({"option": value})
+    elif domain == "number":
+        path = f"/number/{encoded_name}/set"
+        params = urlencode({"value": value})
+    else:
+        return {"ok": False, "error": f"Unsupported domain: {domain}"}
+
+    url = f"http://{ip}:{port}{path}?{params}"
+    try:
+        req = Request(url, method="POST", data=b"")
+        req.add_header("Content-Length", "0")
+        with urlopen(req, timeout=5) as resp:
+            return {"ok": True, "status": resp.status}
+    except URLError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# API routes – devices
+# ---------------------------------------------------------------------------
+
+@app.route("/api/devices", methods=["GET"])
+def list_devices():
+    return jsonify(list(load_devices().values()))
+
+
+@app.route("/api/devices", methods=["POST"])
+def add_device():
+    body = request.get_json(force=True)
+    name = (body.get("name") or "").strip()
+    ip = (body.get("ip") or "").strip()
+    port = int(body.get("port") or 80)
+
+    if not name or not ip:
+        return jsonify({"error": "name and ip are required"}), 400
+
+    devices = load_devices()
+    device_id = str(uuid.uuid4())
+    device = {"id": device_id, "name": name, "ip": ip, "port": port}
+    devices[device_id] = device
+    save_devices(devices)
+    return jsonify(device), 201
+
+
+@app.route("/api/devices/<device_id>", methods=["PUT"])
+def update_device(device_id):
+    devices = load_devices()
+    if device_id not in devices:
+        return jsonify({"error": "Device not found"}), 404
+
+    body = request.get_json(force=True)
+    device = devices[device_id]
+    if "name" in body and body["name"].strip():
+        device["name"] = body["name"].strip()
+    if "ip" in body and body["ip"].strip():
+        device["ip"] = body["ip"].strip()
+    if "port" in body:
+        device["port"] = int(body["port"])
+
+    save_devices(devices)
+    return jsonify(device)
+
+
+@app.route("/api/devices/<device_id>", methods=["DELETE"])
+def delete_device(device_id):
+    devices = load_devices()
+    if device_id not in devices:
+        return jsonify({"error": "Device not found"}), 404
+    del devices[device_id]
+    save_devices(devices)
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# API routes – ESPHome data & commands
+# ---------------------------------------------------------------------------
+
+@app.route("/api/devices/<device_id>/stream")
+def stream_device(device_id):
+    """
+    Proxy the ESPHome /events SSE stream to the browser.
+    ESPHome sends all current entity states on connect, then live updates.
+    Uses requests (handles chunked transfer encoding automatically).
+    Auto-reconnects if the connection drops.
+    """
+    devices = load_devices()
+    if device_id not in devices:
+        return jsonify({"error": "Device not found"}), 404
+
+    device = devices[device_id]
+    ip = device["ip"]
+    port = device["port"]
+
+    def generate():
+        log.info("SSE stream open  device=%s  ip=%s:%s", device_id, ip, port)
+        while True:
+            try:
+                with _req.get(
+                    f"http://{ip}:{port}/events",
+                    stream=True,
+                    timeout=(5, 65),  # 5s connect, 65s read (ESPHome pings every 30s)
+                    headers={"Accept": "text/event-stream", "Cache-Control": "no-cache"},
+                ) as resp:
+                    resp.raise_for_status()
+                    log.debug("SSE connected  device=%s  status=%s", device_id, resp.status_code)
+                    for chunk in resp.iter_content(chunk_size=512):
+                        if chunk:
+                            yield chunk
+            except GeneratorExit:
+                log.info("SSE stream closed  device=%s", device_id)
+                return
+            except Exception as exc:
+                log.warning("SSE error  device=%s  err=%s — reconnecting in 5 s", device_id, exc)
+                msg = f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+                yield msg.encode()
+                time.sleep(5)  # wait before reconnecting
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.route("/api/devices/<device_id>/command", methods=["POST"])
+def send_command(device_id):
+    devices = load_devices()
+    if device_id not in devices:
+        return jsonify({"error": "Device not found"}), 404
+
+    device = devices[device_id]
+    body = request.get_json(force=True)
+
+    # entity.id in the frontend is "domain/Entity Name" (ESPHome v3 format)
+    domain = (body.get("domain") or "").strip()
+    name = (body.get("name") or "").strip()    # friendly name, e.g. "Marstek User Work Mode"
+    value = str(body.get("value") or "").strip()
+
+    if not domain or not name or value == "":
+        return jsonify({"error": "domain, name, and value are required"}), 400
+
+    result = send_esphome_command(device["ip"], device["port"], domain, name, value)
+    return jsonify(result), 200 if result.get("ok") else 502
+
+
+# ---------------------------------------------------------------------------
+# Frank Energie – prices + authentication (via python-frank-energie package)
+# ---------------------------------------------------------------------------
+
+import asyncio
+import xml.etree.ElementTree as ET
+import re as _re
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+from python_frank_energie import FrankEnergie
+
+FRANK_SESSION_FILE = os.path.join(BASE_DIR, "frank_session.json")
+_price_cache: dict = {}   # keyed by ISO date string
+
+
+def _country_from_token(token: str) -> str | None:
+    """Decode the JWT payload (no signature check) to extract countryCode."""
+    try:
+        import base64
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (4 - len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        return payload.get("countryCode") or None
+    except Exception:
+        return None
+
+
+def _frank_session() -> dict:
+    if os.path.exists(FRANK_SESSION_FILE):
+        with open(FRANK_SESSION_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_frank_session(data: dict) -> None:
+    with open(FRANK_SESSION_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+FRANK_API_URL = "https://graphql.frankenergie.nl/"
+
+_QUERY_NL = """
+query MarketPrices($startDate: String!, $endDate: String!) {
+  marketPricesElectricity(startDate: $startDate, endDate: $endDate) {
+    from till marketPrice marketPriceTax sourcingMarkupPrice energyTaxPrice perUnit
+  }
+}
+"""
+
+_QUERY_NL_AUTH = """
+query CustomerPrices($startDate: String!, $endDate: String!) {
+  pricesElectricity(startDate: $startDate, endDate: $endDate) {
+    from till marketPrice marketPriceTax sourcingMarkupPrice energyTaxPrice perUnit
+  }
+}
+"""
+
+_QUERY_BE = """
+query MarketPrices($date: String!) {
+  marketPrices(date: $date) {
+    electricityPrices {
+      from till marketPrice marketPriceTax sourcingMarkupPrice energyTaxPrice perUnit
+    }
+  }
+}
+"""
+
+
+def _frank_request(query: str, variables: dict, auth_token: str | None = None,
+                   country: str = "NL") -> dict:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "x-graphql-client-name": "frank-app",
+        "x-graphql-client-version": "4.13.3",
+        "skip-graphcdn": "1",
+    }
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    if country == "BE":
+        headers["x-country"] = "BE"
+    log.debug("Frank API  url=%s  country=%s  vars=%s", FRANK_API_URL, country, variables)
+    resp = _req.post(FRANK_API_URL,
+                     json={"query": query, "variables": variables},
+                     headers=headers, timeout=15)
+    resp.raise_for_status()
+    body = resp.json()
+    log.debug("Frank API response keys: %s", list(body.keys()))
+    if "errors" in body:
+        msgs = [e.get("message", "?") for e in body["errors"]]
+        log.error("Frank API errors: %s", msgs)
+        raise ValueError("; ".join(msgs))
+    return body.get("data", {})
+
+
+def _fetch_prices(auth_token: str | None, start: date, end: date,
+                  country: str = "NL") -> list:
+    """Return a list of hourly price dicts for [start, end)."""
+    if country == "BE":
+        data = _frank_request(_QUERY_BE, {"date": str(start)},
+                               auth_token=auth_token, country="BE")
+        mp = data.get("marketPrices") or {}
+        rows = mp.get("electricityPrices") or []
+        log.debug("BE price rows: %d  raw keys: %s", len(rows), list(mp.keys()))
+    elif auth_token:
+        try:
+            data = _frank_request(_QUERY_NL_AUTH,
+                                   {"startDate": str(start), "endDate": str(end)},
+                                   auth_token=auth_token)
+            rows = data.get("pricesElectricity") or []
+            if not rows:           # fall back to public
+                raise ValueError("empty personalized response")
+        except Exception as exc:
+            log.warning("Personalized prices failed (%s) — falling back to market prices", exc)
+            data = _frank_request(_QUERY_NL, {"startDate": str(start), "endDate": str(end)})
+            rows = data.get("marketPricesElectricity") or []
+    else:
+        data = _frank_request(_QUERY_NL, {"startDate": str(start), "endDate": str(end)})
+        rows = data.get("marketPricesElectricity") or []
+
+    return rows  # already plain dicts with the keys the frontend expects
+
+
+@app.route("/api/frank/login", methods=["POST"])
+def frank_login():
+    body     = request.get_json(force=True)
+    email    = (body.get("email")    or "").strip()
+    password = (body.get("password") or "").strip()
+
+    if not email or not password:
+        return jsonify({"error": "email and password required"}), 400
+
+    try:
+        log.info("Frank Energie login  email=%s", email)
+
+        async def do_login():
+            async with FrankEnergie() as fe:
+                auth = await fe.login(email, password)
+            return auth
+
+        auth = asyncio.run(do_login())
+
+        # Extract country from JWT payload (avoids fe.me() which has a BE bug)
+        country = _country_from_token(auth.authToken) or "NL"
+        log.info("Country from JWT: %s", country)
+        log.info("Frank login OK  email=%s  country=%s", email, country)
+        session = {
+            "email":        email,
+            "authToken":    auth.authToken,
+            "refreshToken": auth.refreshToken,
+            "country":      country,
+            "ts":           int(time.time()),
+        }
+        _save_frank_session(session)
+        _price_cache.clear()
+        log.info("Frank login OK  email=%s", email)
+        return jsonify({"ok": True, "email": email})
+    except Exception as exc:
+        log.error("Frank login error: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/frank/logout", methods=["POST"])
+def frank_logout():
+    if os.path.exists(FRANK_SESSION_FILE):
+        os.remove(FRANK_SESSION_FILE)
+    _price_cache.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/frank/status", methods=["GET"])
+def frank_status():
+    s = _frank_session()
+    if s.get("authToken"):
+        return jsonify({"loggedIn": True, "email": s.get("email"), "country": s.get("country") or "NL"})
+    return jsonify({"loggedIn": False})
+
+
+@app.route("/api/prices/electricity", methods=["GET"])
+def get_electricity_prices():
+    today    = date.today()
+    tomorrow = today + timedelta(days=1)
+
+    cache_key = today.isoformat()
+    cached = _price_cache.get(cache_key)
+    if cached and (time.time() - cached["ts"]) < 1800:
+        return jsonify(cached["data"])
+
+    session       = _frank_session()
+    auth_token    = session.get("authToken")
+    refresh_token = session.get("refreshToken")
+    country       = session.get("country") or _country_from_token(auth_token or "") or "NL"
+
+    try:
+        log.info("Fetching electricity prices  date=%s  loggedIn=%s  country=%s",
+                 today.isoformat(), bool(auth_token), country)
+        today_prices = _fetch_prices(auth_token, today, tomorrow, country)
+        log.debug("Today prices: %d slots", len(today_prices))
+
+        tomorrow_prices: list = []
+        try:
+            tomorrow_prices = _fetch_prices(auth_token, tomorrow, tomorrow + timedelta(days=1), country)
+            log.debug("Tomorrow prices: %d slots", len(tomorrow_prices))
+        except Exception as exc2:
+            log.warning("Tomorrow prices unavailable: %s", exc2)
+
+        result = {
+            "today":    today_prices,
+            "tomorrow": tomorrow_prices,
+            "loggedIn": bool(auth_token),
+            "email":    session.get("email"),
+        }
+        _price_cache[cache_key] = {"data": result, "ts": time.time()}
+        return jsonify(result)
+    except Exception as exc:
+        log.error("Prices fetch error: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 502
+
+
+# ---------------------------------------------------------------------------
+# HomeWizard Energy – local API (no authentication required)
+# ---------------------------------------------------------------------------
+
+HW_DEVICES_FILE = os.path.join(BASE_DIR, "homewizard_devices.json")
+
+# Metadata for known sensor keys (supports both old v3 and new v4+ field names)
+HW_SENSOR_META: dict = {
+    # ── Vermogen ───────────────────────────────────────────────────────────
+    "power_w":              {"label": "Vermogen totaal",      "unit": "W",     "group": "Vermogen", "power": True},
+    "power_l1_w":           {"label": "Vermogen L1",          "unit": "W",     "group": "Vermogen", "power": True},
+    "power_l2_w":           {"label": "Vermogen L2",          "unit": "W",     "group": "Vermogen", "power": True},
+    "power_l3_w":           {"label": "Vermogen L3",          "unit": "W",     "group": "Vermogen", "power": True},
+    "active_power_w":       {"label": "Vermogen totaal",      "unit": "W",     "group": "Vermogen", "power": True},
+    "active_power_l1_w":    {"label": "Vermogen L1",          "unit": "W",     "group": "Vermogen", "power": True},
+    "active_power_l2_w":    {"label": "Vermogen L2",          "unit": "W",     "group": "Vermogen", "power": True},
+    "active_power_l3_w":    {"label": "Vermogen L3",          "unit": "W",     "group": "Vermogen", "power": True},
+    # ── Spanning ───────────────────────────────────────────────────────────
+    "voltage_l1_v":         {"label": "Spanning L1",          "unit": "V",     "group": "Spanning"},
+    "voltage_l2_v":         {"label": "Spanning L2",          "unit": "V",     "group": "Spanning"},
+    "voltage_l3_v":         {"label": "Spanning L3",          "unit": "V",     "group": "Spanning"},
+    "active_voltage_l1_v":  {"label": "Spanning L1",          "unit": "V",     "group": "Spanning"},
+    "active_voltage_l2_v":  {"label": "Spanning L2",          "unit": "V",     "group": "Spanning"},
+    "active_voltage_l3_v":  {"label": "Spanning L3",          "unit": "V",     "group": "Spanning"},
+    # ── Stroom ─────────────────────────────────────────────────────────────
+    "current_l1_a":         {"label": "Stroom L1",            "unit": "A",     "group": "Stroom"},
+    "current_l2_a":         {"label": "Stroom L2",            "unit": "A",     "group": "Stroom"},
+    "current_l3_a":         {"label": "Stroom L3",            "unit": "A",     "group": "Stroom"},
+    "active_current_l1_a":  {"label": "Stroom L1",            "unit": "A",     "group": "Stroom"},
+    "active_current_l2_a":  {"label": "Stroom L2",            "unit": "A",     "group": "Stroom"},
+    "active_current_l3_a":  {"label": "Stroom L3",            "unit": "A",     "group": "Stroom"},
+    # ── Energie totalen ────────────────────────────────────────────────────
+    "energy_import_kwh":        {"label": "Import totaal",    "unit": "kWh",   "group": "Totalen"},
+    "energy_import_t1_kwh":     {"label": "Import tarief 1",  "unit": "kWh",   "group": "Totalen"},
+    "energy_import_t2_kwh":     {"label": "Import tarief 2",  "unit": "kWh",   "group": "Totalen"},
+    "energy_export_kwh":        {"label": "Export totaal",    "unit": "kWh",   "group": "Totalen"},
+    "energy_export_t1_kwh":     {"label": "Export tarief 1",  "unit": "kWh",   "group": "Totalen"},
+    "energy_export_t2_kwh":     {"label": "Export tarief 2",  "unit": "kWh",   "group": "Totalen"},
+    "total_power_import_kwh":   {"label": "Import totaal",    "unit": "kWh",   "group": "Totalen"},
+    "total_power_import_t1_kwh":{"label": "Import tarief 1",  "unit": "kWh",   "group": "Totalen"},
+    "total_power_import_t2_kwh":{"label": "Import tarief 2",  "unit": "kWh",   "group": "Totalen"},
+    "total_power_export_kwh":   {"label": "Export totaal",    "unit": "kWh",   "group": "Totalen"},
+    "total_power_export_t1_kwh":{"label": "Export tarief 1",  "unit": "kWh",   "group": "Totalen"},
+    "total_power_export_t2_kwh":{"label": "Export tarief 2",  "unit": "kWh",   "group": "Totalen"},
+    # ── Overig netmeting ───────────────────────────────────────────────────
+    "frequency_hz":             {"label": "Frequentie",       "unit": "Hz",    "group": "Overig"},
+    "active_frequency_hz":      {"label": "Frequentie",       "unit": "Hz",    "group": "Overig"},
+    "apparent_power_va":        {"label": "Schijnbaar verm.", "unit": "VA",    "group": "Overig"},
+    "active_apparent_power_va": {"label": "Schijnbaar verm.", "unit": "VA",    "group": "Overig"},
+    "reactive_power_var":       {"label": "Reactief verm.",   "unit": "VAr",   "group": "Overig"},
+    "active_reactive_power_var":{"label": "Reactief verm.",   "unit": "VAr",   "group": "Overig"},
+    "power_factor":             {"label": "Vermogensfactor",  "unit": "",      "group": "Overig"},
+    "active_tariff":            {"label": "Actief tarief",    "unit": "",      "group": "Overig"},
+    # ── Gas ────────────────────────────────────────────────────────────────
+    "total_gas_m3":             {"label": "Gasverbruik",      "unit": "m³",    "group": "Gas"},
+    # ── Water ──────────────────────────────────────────────────────────────
+    "total_liter_m3":           {"label": "Waterverbruik",    "unit": "m³",    "group": "Water"},
+    "active_liter_lpm":         {"label": "Debiet",           "unit": "L/min", "group": "Water"},
+    # ── Batterij / stopcontact ─────────────────────────────────────────────
+    "state_of_charge_pct":      {"label": "Batterijlading",   "unit": "%",     "group": "Batterij"},
+}
+
+
+def _hw_devices() -> dict:
+    if os.path.exists(HW_DEVICES_FILE):
+        with open(HW_DEVICES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_hw_devices(devices: dict) -> None:
+    with open(HW_DEVICES_FILE, "w", encoding="utf-8") as f:
+        json.dump(devices, f, indent=2)
+
+
+def _hw_fetch(ip: str, path: str, token: str | None = None, timeout: int = 5) -> dict:
+    """Fetch from a HomeWizard device. Uses v2 (HTTPS + Bearer) when token is given."""
+    if token:
+        resp = _req.get(f"https://{ip}{path}", timeout=timeout, verify=False,
+                        headers={"Authorization": f"Bearer {token}", "X-Api-Version": "2"})
+    else:
+        resp = _req.get(f"http://{ip}{path}", timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _local_subnet() -> str:
+    """Detect the local /24 subnet by probing an external address."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return f"{ip.rsplit('.', 1)[0]}.0/24"
+    except Exception:
+        return "192.168.1.0/24"
+
+
+def _hw_probe(ip: str) -> dict | None:
+    """Try both API v1 and v2 at an IP. Returns device info dict or None.
+    NOTE: api_version is set AFTER **d so our integer (1 or 2) always wins
+    over the device's own api_version field (which can be strings like 'v1').
+    """
+    # v1: plain HTTP, no auth
+    try:
+        resp = _req.get(f"http://{ip}/api", timeout=1)
+        if resp.status_code == 200:
+            d = resp.json()
+            if "product_type" in d or "product_name" in d:
+                return {**d, "ip": ip, "api_version": 1}  # our api_version wins
+    except Exception:
+        pass
+    # v2: HTTPS, self-signed cert, no token needed for /api info endpoint
+    try:
+        resp = _req.get(f"https://{ip}/api", timeout=1, verify=False,
+                        headers={"X-Api-Version": "2"})
+        if resp.status_code == 200:
+            d = resp.json()
+            if "product_type" in d or "product_name" in d:
+                return {**d, "ip": ip, "api_version": 2}  # our api_version wins
+    except Exception:
+        pass
+    return None
+
+
+def _hw_sensor_meta(key: str) -> dict:
+    if key in HW_SENSOR_META:
+        return HW_SENSOR_META[key]
+    # Auto-generate from key name
+    label = key.replace("_", " ").title()
+    unit  = "W" if key.endswith("_w") else \
+            "V" if key.endswith("_v") else \
+            "A" if key.endswith("_a") else \
+            "kWh" if key.endswith("_kwh") else \
+            "Hz" if key.endswith("_hz") else \
+            "m³" if key.endswith("_m3") else ""
+    return {"label": label, "unit": unit, "group": "Overig"}
+
+
+@app.route("/api/homewizard/devices", methods=["GET"])
+def hw_list_devices():
+    return jsonify(list(_hw_devices().values()))
+
+
+@app.route("/api/homewizard/devices", methods=["POST"])
+def hw_add_device():
+    body  = request.get_json(force=True)
+    ip    = (body.get("ip")    or "").strip()
+    name  = (body.get("name")  or "").strip()
+    token = (body.get("token") or "").strip() or None
+    api_v = int(body.get("api_version") or 1)
+    if not ip:
+        return jsonify({"error": "IP-adres is vereist"}), 400
+
+    # Auto-probe if version not supplied
+    probe = None
+    try:
+        probe = _hw_probe(ip)
+        if probe:
+            api_v = probe.get("api_version", api_v)
+    except Exception:
+        pass
+
+    if not probe:
+        # Manual add: trust caller's api_version
+        try:
+            info = _hw_fetch(ip, "/api", token=token if api_v == 2 else None)
+        except Exception as exc:
+            return jsonify({"error": f"Apparaat niet bereikbaar: {exc}"}), 502
+    else:
+        info = probe
+
+    devices   = _hw_devices()
+    device_id = str(uuid.uuid4())
+    device    = {
+        "id":               device_id,
+        "name":             name or info.get("product_name", "HomeWizard"),
+        "ip":               ip,
+        "api_version":      api_v,
+        "token":            token,
+        "product_type":     info.get("product_type", ""),
+        "product_name":     info.get("product_name", ""),
+        "firmware_version": info.get("firmware_version", ""),
+        "selected_sensors": [],
+    }
+    devices[device_id] = device
+    _save_hw_devices(devices)
+    log.info("HomeWizard device added  id=%s  ip=%s  type=%s  api_v=%s",
+             device_id, ip, device["product_type"], api_v)
+    return jsonify(device), 201
+
+
+@app.route("/api/homewizard/devices/<device_id>", methods=["DELETE"])
+def hw_delete_device(device_id):
+    devices = _hw_devices()
+    if device_id not in devices:
+        return jsonify({"error": "Niet gevonden"}), 404
+    del devices[device_id]
+    _save_hw_devices(devices)
+    return jsonify({"ok": True})
+
+
+def _hw_data_path(dev: dict) -> str:
+    return "/api/v2/measurement" if dev.get("api_version") == 2 else "/api/v1/data"
+
+
+@app.route("/api/homewizard/devices/<device_id>/discover")
+def hw_discover(device_id):
+    """Fetch live data and return annotated sensor list for selection UI."""
+    devices = _hw_devices()
+    if device_id not in devices:
+        return jsonify({"error": "Niet gevonden"}), 404
+    device = devices[device_id]
+    try:
+        data = _hw_fetch(device["ip"], _hw_data_path(device), token=device.get("token"))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    selected = set(device.get("selected_sensors") or [])
+    sensors  = []
+    for key, value in data.items():
+        if not isinstance(value, (int, float)):
+            continue
+        meta = _hw_sensor_meta(key)
+        sensors.append({
+            "key":      key,
+            "label":    meta["label"],
+            "unit":     meta["unit"],
+            "group":    meta["group"],
+            "value":    value,
+            "selected": key in selected,
+        })
+
+    sensors.sort(key=lambda s: (s["group"], s["label"]))
+    return jsonify({"device": device, "sensors": sensors})
+
+
+@app.route("/api/homewizard/devices/<device_id>/sensors", methods=["PUT"])
+def hw_save_sensors(device_id):
+    devices = _hw_devices()
+    if device_id not in devices:
+        return jsonify({"error": "Niet gevonden"}), 404
+    body = request.get_json(force=True)
+    devices[device_id]["selected_sensors"] = body.get("sensors", [])
+    _save_hw_devices(devices)
+    log.info("HomeWizard sensors updated  id=%s  count=%d",
+             device_id, len(devices[device_id]["selected_sensors"]))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/homewizard/devices/<device_id>/pair", methods=["POST"])
+def hw_pair_v2(device_id):
+    """Obtain a v2 token by triggering the button-press flow.
+    The user must press the physical button on the device within 30 s of this call.
+    """
+    devices = _hw_devices()
+    if device_id not in devices:
+        return jsonify({"error": "Niet gevonden"}), 404
+    dev = devices[device_id]
+    ip  = dev["ip"]
+    try:
+        resp = _req.post(
+            f"https://{ip}/api/user",
+            json={"name": "local/marstek-dashboard"},
+            headers={"X-Api-Version": "2"},
+            timeout=35,
+            verify=False,
+        )
+        resp.raise_for_status()
+        token = resp.json().get("token", "")
+        if not token:
+            raise ValueError("Geen token ontvangen — is de knop ingedrukt?")
+        dev["token"]       = token
+        dev["api_version"] = 2
+        _save_hw_devices(devices)
+        log.info("HomeWizard v2 paired  id=%s  ip=%s", device_id, ip)
+        return jsonify({"ok": True, "token_hint": f"…{token[-4:]}"})
+    except Exception as exc:
+        log.warning("HomeWizard v2 pair failed  id=%s  err=%s", device_id, exc)
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/homewizard/data")
+def hw_data():
+    """Poll all HomeWizard devices and return selected sensor values."""
+    devices = _hw_devices()
+    result  = []
+    for dev in devices.values():
+        selected = dev.get("selected_sensors") or []
+        entry = {
+            "id":           dev["id"],
+            "name":         dev["name"],
+            "product_type": dev.get("product_type", ""),
+            "api_version":  dev.get("api_version", 1),
+            "reachable":    False,
+            "sensors":      {},
+            "error":        None,
+        }
+        try:
+            data = _hw_fetch(dev["ip"], _hw_data_path(dev), token=dev.get("token"))
+            entry["reachable"] = True
+            for key in selected:
+                if key in data and isinstance(data[key], (int, float)):
+                    meta = _hw_sensor_meta(key)
+                    entry["sensors"][key] = {
+                        "value": data[key],
+                        "label": meta["label"],
+                        "unit":  meta["unit"],
+                        "group": meta["group"],
+                        "power": meta.get("power", False),
+                    }
+        except Exception as exc:
+            entry["error"] = str(exc)
+            log.warning("HomeWizard poll failed  id=%s  err=%s", dev["id"], exc)
+        result.append(entry)
+
+    return jsonify({"devices": result, "ts": int(time.time())})
+
+
+@app.route("/api/homewizard/localsubnet")
+def hw_local_subnet():
+    return jsonify({"subnet": _local_subnet()})
+
+
+@app.route("/api/homewizard/scan")
+def hw_scan():
+    """Scan a subnet for HomeWizard devices (concurrent probing)."""
+    subnet_str = (request.args.get("subnet") or _local_subnet()).strip()
+    try:
+        network = ipaddress.IPv4Network(subnet_str, strict=False)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if network.num_addresses > 1024:
+        return jsonify({"error": "Subnet te groot (max /22)"}), 400
+
+    hosts = list(network.hosts())
+    log.info("HomeWizard scan  subnet=%s  hosts=%d", subnet_str, len(hosts))
+
+    found = []
+    with ThreadPoolExecutor(max_workers=64) as pool:
+        futures = {pool.submit(_hw_probe, str(h)): str(h) for h in hosts}
+        for fut in as_completed(futures):
+            try:
+                result = fut.result()
+                if result:
+                    found.append(result)
+            except Exception as exc:
+                log.debug("Probe exception: %s", exc)
+
+    found.sort(key=lambda d: [int(x) for x in d["ip"].split(".")])
+    log.info("HomeWizard scan complete  found=%d", len(found))
+    return jsonify({"subnet": subnet_str, "found": found})
+
+
+# ---------------------------------------------------------------------------
+# Flow source mappings
+# ---------------------------------------------------------------------------
+
+FLOW_SOURCES_FILE = os.path.join(BASE_DIR, "flow_sources.json")
+
+FLOW_SLOT_DEFS = {
+    "net_power":  {"label": "Net vermogen",      "unit": "W",
+                   "desc": "Positief = import van net, negatief = export. HomeWizard P1 power_w past direct."},
+    "bat_power":  {"label": "Batterijvermogen",   "unit": "W",
+                   "desc": "Positief = ontladen, negatief = laden. Standaard: som van alle ESPHome batterijen."},
+    "voltage_l1": {"label": "Spanning L1",         "unit": "V", "desc": "Fasespanning L1 (V)"},
+    "voltage_l2": {"label": "Spanning L2",         "unit": "V", "desc": "Fasespanning L2 (V)"},
+    "voltage_l3": {"label": "Spanning L3",         "unit": "V", "desc": "Fasespanning L3 (V)"},
+}
+
+_flow_live_cache: dict = {"data": {}, "ts": 0}
+
+
+def _flow_sources_cfg() -> dict:
+    if os.path.exists(FLOW_SOURCES_FILE):
+        with open(FLOW_SOURCES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+@app.route("/api/flow/sources", methods=["GET"])
+def get_flow_sources():
+    return jsonify(_flow_sources_cfg())
+
+
+@app.route("/api/flow/sources", methods=["PUT"])
+def put_flow_sources():
+    body = request.get_json(force=True)
+    # Validate: only allow known slots
+    cleaned = {k: v for k, v in body.items() if k in FLOW_SLOT_DEFS}
+    with open(FLOW_SOURCES_FILE, "w", encoding="utf-8") as f:
+        json.dump(cleaned, f, indent=2)
+    _flow_live_cache["ts"] = 0  # invalidate cache
+    log.info("Flow sources updated: %s", list(cleaned.keys()))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/flow/options")
+def get_flow_options():
+    """Return all available HomeWizard sensor options, grouped by unit, with current live values."""
+    options = []
+    for dev in _hw_devices().values():
+        try:
+            data = _hw_fetch(dev["ip"], _hw_data_path(dev), token=dev.get("token"), timeout=3)
+        except Exception:
+            continue
+        for key, value in data.items():
+            if not isinstance(value, (int, float)):
+                continue
+            meta = _hw_sensor_meta(key)
+            options.append({
+                "source":      "homewizard",
+                "device_id":   dev["id"],
+                "device_name": dev["name"],
+                "sensor":      key,
+                "label":       f"{dev['name']} — {meta['label']}",
+                "unit":        meta["unit"],
+                "value":       value,
+            })
+    return jsonify({"slots": FLOW_SLOT_DEFS, "options": options})
+
+
+@app.route("/api/flow/live")
+def get_flow_live():
+    """Resolve current values for all configured flow source slots."""
+    now = time.time()
+    if now - _flow_live_cache["ts"] < 5:   # 5 s TTL
+        return jsonify(_flow_live_cache["data"])
+
+    cfg     = _flow_sources_cfg()
+    devices = _hw_devices()
+    result  = {}
+
+    for slot, slot_cfg in cfg.items():
+        if not slot_cfg or slot_cfg.get("source") != "homewizard":
+            continue
+        dev_id = slot_cfg.get("device_id")
+        sensor = slot_cfg.get("sensor")
+        if not dev_id or not sensor or dev_id not in devices:
+            continue
+        dev = devices[dev_id]
+        try:
+            data  = _hw_fetch(dev["ip"], _hw_data_path(dev), token=dev.get("token"), timeout=3)
+            value = data.get(sensor)
+            if value is None or not isinstance(value, (int, float)):
+                continue
+            if slot_cfg.get("invert"):
+                value = -value
+            result[slot] = {
+                "value":        value,
+                "source_label": f"{dev['name']} / {sensor}",
+            }
+        except Exception as exc:
+            result[slot] = {"error": str(exc)}
+
+    _flow_live_cache["data"] = result
+    _flow_live_cache["ts"]   = now
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# ENTSO-E Transparency Platform – quarter-hour prices
+# ---------------------------------------------------------------------------
+
+ENTSOE_SETTINGS_FILE = os.path.join(BASE_DIR, "entsoe_settings.json")
+ENTSOE_API_URL = "https://web-api.tp.entsoe.eu/api"
+ENTSOE_ZONES = {
+    "BE": "10YBE----------2",
+    "NL": "10YNL----------L",
+}
+_entsoe_cache: dict = {}
+
+
+def _entsoe_settings() -> dict:
+    if os.path.exists(ENTSOE_SETTINGS_FILE):
+        with open(ENTSOE_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _parse_entsoe_xml(xml_text: str) -> list:
+    """Parse ENTSO-E Publication_MarketDocument XML → list of price dicts (UTC times)."""
+    root = ET.fromstring(xml_text)
+    ns_m = _re.match(r"\{(.+)\}", root.tag)
+    ns = f"{{{ns_m.group(1)}}}" if ns_m else ""
+
+    # Surface API-level errors embedded in XML
+    reason = root.find(f".//{ns}Reason/{ns}Text") or root.find(f".//{ns}Text")
+    code_el = root.find(f".//{ns}Reason/{ns}code") or root.find(f".//{ns}code")
+    if code_el is not None and code_el.text and code_el.text.strip() != "999":
+        raise ValueError(f"ENTSO-E fout: {reason.text if reason is not None else 'onbekend'}")
+
+    rows = []
+    for ts in root.findall(f"{ns}TimeSeries"):
+        for period in ts.findall(f"{ns}Period"):
+            res_el = period.find(f"{ns}resolution")
+            resolution = (res_el.text or "PT60M").strip()
+            interval_min = {"PT15M": 15, "PT30M": 30, "PT60M": 60}.get(resolution, 60)
+            interval = timedelta(minutes=interval_min)
+
+            ti = period.find(f"{ns}timeInterval")
+            if ti is None:
+                continue
+            start_el = ti.find(f"{ns}start")
+            if start_el is None:
+                continue
+            period_start = datetime.fromisoformat(start_el.text.replace("Z", "+00:00"))
+
+            for point in period.findall(f"{ns}Point"):
+                pos_el   = point.find(f"{ns}position")
+                price_el = point.find(f"{ns}price.amount")
+                if pos_el is None or price_el is None:
+                    continue
+                pos        = int(pos_el.text)
+                price_kwh  = float(price_el.text) / 1000.0
+                slot_start = period_start + (pos - 1) * interval
+                slot_end   = slot_start + interval
+                rows.append({
+                    "from":                slot_start.isoformat(),
+                    "till":                slot_end.isoformat(),
+                    "marketPrice":         price_kwh,
+                    "marketPriceTax":      0.0,
+                    "sourcingMarkupPrice": 0.0,
+                    "energyTaxPrice":      0.0,
+                })
+
+    rows.sort(key=lambda r: r["from"])
+    return rows
+
+
+def _fetch_entsoe_day(api_key: str, target_date: date, country: str = "BE",
+                      tz_name: str | None = None) -> list:
+    zone_id = ENTSOE_ZONES.get(country, ENTSOE_ZONES["BE"])
+    if not tz_name:
+        tz_name = _entsoe_settings().get("timezone") or "Europe/Brussels"
+    tz = ZoneInfo(tz_name)
+
+    local_start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=tz)
+    local_end   = local_start + timedelta(days=1)
+    utc_start   = local_start.astimezone(ZoneInfo("UTC"))
+    utc_end     = local_end.astimezone(ZoneInfo("UTC"))
+
+    params = {
+        "securityToken": api_key,
+        "documentType":  "A44",
+        "in_Domain":     zone_id,
+        "out_Domain":    zone_id,
+        "periodStart":   utc_start.strftime("%Y%m%d%H%M"),
+        "periodEnd":     utc_end.strftime("%Y%m%d%H%M"),
+    }
+    log.info("ENTSO-E fetch  country=%s  date=%s  start=%s  end=%s",
+             country, target_date, params["periodStart"], params["periodEnd"])
+    resp = _req.get(ENTSOE_API_URL, params=params, timeout=15)
+    resp.raise_for_status()
+
+    all_rows = _parse_entsoe_xml(resp.text)
+    log.debug("ENTSO-E raw rows: %d", len(all_rows))
+
+    # Convert UTC → local and filter to exactly the requested local date
+    result = []
+    for row in all_rows:
+        slot_local = datetime.fromisoformat(row["from"]).astimezone(tz)
+        till_local = datetime.fromisoformat(row["till"]).astimezone(tz)
+        if slot_local.date() == target_date:
+            result.append({**row, "from": slot_local.isoformat(), "till": till_local.isoformat()})
+
+    log.info("ENTSO-E result  country=%s  date=%s  rows=%d", country, target_date, len(result))
+    return result
+
+
+@app.route("/api/entsoe/settings", methods=["GET"])
+def get_entsoe_settings_route():
+    s   = _entsoe_settings()
+    key = s.get("apiKey", "")
+    return jsonify({
+        "configured":  bool(key),
+        "apiKeyHint":  f"…{key[-4:]}" if len(key) > 4 else ("✓" if key else ""),
+        "timezone":    s.get("timezone") or "Europe/Brussels",
+        "country":     s.get("country")  or "BE",
+    })
+
+
+@app.route("/api/entsoe/settings", methods=["POST"])
+def set_entsoe_settings_route():
+    body     = request.get_json(force=True)
+    s        = _entsoe_settings()
+    key      = (body.get("apiKey")   or "").strip()
+    timezone = (body.get("timezone") or s.get("timezone") or "Europe/Brussels").strip()
+    country  = (body.get("country")  or s.get("country")  or "BE").strip().upper()
+
+    # Validate timezone
+    try:
+        ZoneInfo(timezone)
+    except Exception:
+        return jsonify({"error": f"Onbekende tijdzone: {timezone}"}), 400
+
+    new_settings = {**s, "timezone": timezone, "country": country}
+    if "apiKey" in body:  # explicitly provided (even empty = clear)
+        new_settings["apiKey"] = key
+
+    with open(ENTSOE_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(new_settings, f, indent=2)
+    _entsoe_cache.clear()
+    log.info("ENTSO-E settings updated  timezone=%s  country=%s  key_set=%s",
+             timezone, country, bool(new_settings.get("apiKey")))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/prices/entsoe")
+def get_entsoe_prices():
+    s       = _entsoe_settings()
+    api_key = s.get("apiKey", "").strip()
+    if not api_key:
+        return jsonify({"error": "ENTSO-E API sleutel niet geconfigureerd. Voeg toe via Instellingen."}), 400
+
+    # Use configured country/timezone; request arg can override country
+    country  = (request.args.get("country") or s.get("country") or "BE").upper()
+    tz_name  = s.get("timezone") or "Europe/Brussels"
+    today    = date.today()
+    tomorrow = today + timedelta(days=1)
+
+    cache_key = f"entsoe_{country}_{tz_name}_{today.isoformat()}"
+    cached = _entsoe_cache.get(cache_key)
+    if cached and (time.time() - cached["ts"]) < 1800:
+        return jsonify(cached["data"])
+
+    try:
+        today_prices    = _fetch_entsoe_day(api_key, today, country, tz_name)
+        tomorrow_prices: list = []
+        try:
+            tomorrow_prices = _fetch_entsoe_day(api_key, tomorrow, country, tz_name)
+        except Exception as exc2:
+            log.warning("ENTSO-E tomorrow prices unavailable: %s", exc2)
+
+        result = {
+            "today":    today_prices,
+            "tomorrow": tomorrow_prices,
+            "source":   "entsoe",
+            "loggedIn": False,
+            "email":    None,
+        }
+        _entsoe_cache[cache_key] = {"data": result, "ts": time.time()}
+        return jsonify(result)
+    except Exception as exc:
+        log.error("ENTSO-E prices error: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 502
+
+
+# ---------------------------------------------------------------------------
+# Home Assistant integration
+# ---------------------------------------------------------------------------
+
+HA_SETTINGS_FILE = os.path.join(BASE_DIR, "ha_settings.json")
+_ha_sensor_cache: dict = {"data": {}, "ts": 0}
+
+
+def _ha_settings() -> dict:
+    if os.path.exists(HA_SETTINGS_FILE):
+        with open(HA_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _ha_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+@app.route("/api/ha/settings", methods=["GET"])
+def get_ha_settings():
+    s = _ha_settings()
+    return jsonify({
+        "configured": bool(s.get("token")),
+        "url":        s.get("url", ""),
+        "tokenHint":  f"…{s['token'][-4:]}" if s.get("token") else "",
+    })
+
+
+@app.route("/api/ha/settings", methods=["POST"])
+def post_ha_settings():
+    body = request.get_json(force=True)
+    current = _ha_settings()
+
+    url = (body.get("url") or current.get("url", "")).rstrip("/")
+    token = body.get("token", "").strip()
+
+    if not url:
+        return jsonify({"error": "URL is verplicht."}), 400
+
+    s = {"url": url, "token": token if token else current.get("token", "")}
+    with open(HA_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(s, f, indent=2)
+    _ha_sensor_cache["ts"] = 0
+    return jsonify({"ok": True})
+
+
+@app.route("/api/ha/test", methods=["POST"])
+def test_ha():
+    """Test HA connection and return server info."""
+    s = _ha_settings()
+    if not s.get("token") or not s.get("url"):
+        return jsonify({"error": "Niet geconfigureerd."}), 400
+    try:
+        r = _req.get(f"{s['url']}/api/", headers=_ha_headers(s["token"]), timeout=5, verify=False)
+        if r.status_code == 401:
+            return jsonify({"error": "Ongeldige token (401 Unauthorized)."}), 401
+        r.raise_for_status()
+        data = r.json()
+        return jsonify({"ok": True, "message": data.get("message", "OK"), "version": data.get("version")})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/ha/entities")
+def get_ha_entities():
+    """Return all HA states (numeric entities only) for sensor selection."""
+    s = _ha_settings()
+    if not s.get("token") or not s.get("url"):
+        return jsonify({"entities": []})
+
+    now = time.time()
+    if now - _ha_sensor_cache["ts"] < 30 and _ha_sensor_cache["data"]:
+        return jsonify({"entities": _ha_sensor_cache["data"]})
+
+    try:
+        r = _req.get(f"{s['url']}/api/states", headers=_ha_headers(s["token"]), timeout=8, verify=False)
+        r.raise_for_status()
+        states = r.json()
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    entities = []
+    for state in states:
+        entity_id = state.get("entity_id", "")
+        raw_state = state.get("state", "")
+        attrs = state.get("attributes", {})
+        unit = attrs.get("unit_of_measurement", "")
+        friendly = attrs.get("friendly_name", entity_id)
+
+        # Only include numeric entities with useful units
+        try:
+            float(raw_state)
+        except (ValueError, TypeError):
+            continue
+
+        entities.append({
+            "entity_id":    entity_id,
+            "friendly_name": friendly,
+            "state":        raw_state,
+            "unit":         unit,
+            "domain":       entity_id.split(".")[0] if "." in entity_id else "",
+        })
+
+    # Sort: sensors first, then by name
+    entities.sort(key=lambda e: (0 if e["domain"] == "sensor" else 1, e["friendly_name"].lower()))
+
+    _ha_sensor_cache["data"] = entities
+    _ha_sensor_cache["ts"]   = now
+    return jsonify({"entities": entities})
+
+
+@app.route("/api/ha/state/<path:entity_id>")
+def get_ha_state(entity_id):
+    """Fetch current state of a single HA entity."""
+    s = _ha_settings()
+    if not s.get("token") or not s.get("url"):
+        return jsonify({"error": "Niet geconfigureerd."}), 400
+    try:
+        r = _req.get(f"{s['url']}/api/states/{entity_id}",
+                     headers=_ha_headers(s["token"]), timeout=5, verify=False)
+        if r.status_code == 404:
+            return jsonify({"error": f"Entity '{entity_id}' niet gevonden."}), 404
+        r.raise_for_status()
+        data = r.json()
+        attrs = data.get("attributes", {})
+        return jsonify({
+            "entity_id":    entity_id,
+            "state":        data.get("state"),
+            "unit":         attrs.get("unit_of_measurement", ""),
+            "friendly_name": attrs.get("friendly_name", entity_id),
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/ha/poll", methods=["POST"])
+def poll_ha_sensors():
+    """Batch-poll a list of entity_ids. Returns {entity_id: {value, unit}} map."""
+    s = _ha_settings()
+    if not s.get("token") or not s.get("url"):
+        return jsonify({"error": "Niet geconfigureerd."}), 400
+
+    body = request.get_json(force=True)
+    entity_ids = body.get("entity_ids", [])
+    if not entity_ids:
+        return jsonify({})
+
+    result = {}
+    headers = _ha_headers(s["token"])
+
+    def fetch_one(eid):
+        try:
+            r = _req.get(f"{s['url']}/api/states/{eid}", headers=headers, timeout=4, verify=False)
+            if not r.ok:
+                return eid, None
+            data = r.json()
+            attrs = data.get("attributes", {})
+            try:
+                value = float(data.get("state", ""))
+            except (ValueError, TypeError):
+                value = None
+            return eid, {"value": value, "unit": attrs.get("unit_of_measurement", "")}
+        except Exception:
+            return eid, None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for eid, val in pool.map(fetch_one, entity_ids):
+            if val is not None:
+                result[eid] = val
+
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Forecast.Solar
+# ---------------------------------------------------------------------------
+
+FORECAST_SETTINGS_FILE = os.path.join(BASE_DIR, "forecast_settings.json")
+_forecast_cache: dict = {"data": None, "ts": 0}
+FORECAST_CACHE_TTL = 900  # 15 minutes
+
+def _forecast_settings() -> dict:
+    if os.path.exists(FORECAST_SETTINGS_FILE):
+        with open(FORECAST_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+@app.route("/api/forecast/settings", methods=["GET"])
+def get_forecast_settings():
+    s = _forecast_settings()
+    return jsonify({
+        "configured": bool(s.get("api_key")),
+        "apiKeyHint": f"…{s['api_key'][-4:]}" if s.get("api_key") else "",
+        "lat":    s.get("lat", ""),
+        "lon":    s.get("lon", ""),
+        "strings": s.get("strings", []),
+    })
+
+@app.route("/api/forecast/settings", methods=["POST"])
+def post_forecast_settings():
+    body = request.get_json(force=True) or {}
+    current = _forecast_settings()
+    if body.get("api_key"):
+        current["api_key"] = body["api_key"].strip()
+    if "lat" in body:    current["lat"]     = body["lat"]
+    if "lon" in body:    current["lon"]     = body["lon"]
+    if "strings" in body: current["strings"] = body["strings"]
+    with open(FORECAST_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(current, f)
+    _forecast_cache["data"] = None  # invalidate
+    return jsonify({"ok": True})
+
+def _fetch_forecast(s: dict) -> dict:
+    """Fetch from forecast.solar and return merged watts dict for all strings."""
+    api_key = s.get("api_key", "")
+    lat  = s.get("lat", "")
+    lon  = s.get("lon", "")
+    strings = s.get("strings", [])
+    if not strings:
+        strings = [{"kwp": s.get("kwp", 1), "az": s.get("az", 0), "dec": s.get("dec", 35)}]
+
+    merged_watts = {}
+    merged_wh_period = {}
+    merged_wh_day = {}
+    errors = []
+
+    for st in strings:
+        kwp = st.get("kwp", 1)
+        az  = st.get("az", 0)
+        dec = st.get("dec", 35)
+        if api_key:
+            url = f"https://api.forecast.solar/{api_key}/estimate/{lat}/{lon}/{dec}/{az}/{kwp}"
+        else:
+            url = f"https://api.forecast.solar/estimate/{lat}/{lon}/{dec}/{az}/{kwp}"
+        try:
+            resp = _req.get(url, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            w  = data.get("result", {}).get("watts", {})
+            wp = data.get("result", {}).get("watt_hours_period", {})
+            wd = data.get("result", {}).get("watt_hours_day", {})
+            for k, v in w.items():
+                merged_watts[k] = merged_watts.get(k, 0) + v
+            for k, v in wp.items():
+                merged_wh_period[k] = merged_wh_period.get(k, 0) + v
+            for k, v in wd.items():
+                merged_wh_day[k] = merged_wh_day.get(k, 0) + v
+        except Exception as e:
+            errors.append(str(e))
+
+    return {
+        "watts": merged_watts,
+        "watt_hours_period": merged_wh_period,
+        "watt_hours_day": merged_wh_day,
+        "errors": errors,
+    }
+
+@app.route("/api/forecast/estimate")
+def get_forecast_estimate():
+    s = _forecast_settings()
+    if not s.get("lat") or not s.get("lon"):
+        return jsonify({"error": "Locatie niet ingesteld."}), 400
+
+    now = time.time()
+    if _forecast_cache["data"] and (now - _forecast_cache["ts"]) < FORECAST_CACHE_TTL:
+        return jsonify(_forecast_cache["data"])
+
+    result = _fetch_forecast(s)
+    _forecast_cache["data"] = result
+    _forecast_cache["ts"]   = now
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Debug endpoint
+# ---------------------------------------------------------------------------
+
+@app.route("/api/debug", methods=["GET"])
+def debug_info():
+    """Returns diagnostics: devices, Frank session state, log tail."""
+    devices = load_devices()
+    session = _frank_session()
+
+    # Last 50 lines of log file
+    log_lines = []
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            log_lines = f.readlines()[-50:]
+    except Exception:
+        log_lines = ["(log file not readable)"]
+
+    # Test connectivity to each device (quick HEAD request)
+    device_status = {}
+    for dev in devices.values():
+        try:
+            r = _req.get(f"http://{dev['ip']}:{dev['port']}/", timeout=2)
+            device_status[dev["id"]] = {"reachable": True, "http_status": r.status_code}
+        except Exception as exc:
+            device_status[dev["id"]] = {"reachable": False, "error": str(exc)}
+
+    return jsonify({
+        "server_time": datetime.now().isoformat(),
+        "devices": list(devices.values()),
+        "device_reachability": device_status,
+        "frank_logged_in": bool(session.get("authToken")),
+        "frank_email": session.get("email"),
+        "frank_endpoint": session.get("endpoint"),
+        "price_cache_keys": list(_price_cache.keys()),
+        "log_tail": [l.rstrip() for l in log_lines],
+    })
+
+
+# ---------------------------------------------------------------------------
+# Strategy & InfluxDB
+# ---------------------------------------------------------------------------
+
+# flow_cfg.json is written by the frontend (localStorage mirror) –
+# we also maintain a server-side copy that the influx writer can read.
+FLOW_CFG_SERVER_FILE = os.path.join(BASE_DIR, "flow_cfg.json")
+
+
+@app.route("/api/flow/cfg", methods=["GET"])
+def get_flow_cfg():
+    try:
+        with open(FLOW_CFG_SERVER_FILE, "r", encoding="utf-8") as f:
+            return jsonify(json.load(f))
+    except Exception:
+        return jsonify({})
+
+
+@app.route("/api/flow/cfg", methods=["POST"])
+def post_flow_cfg():
+    """Frontend calls this whenever marstek_flow_cfg changes in localStorage."""
+    body = request.get_json(force=True) or {}
+    with open(FLOW_CFG_SERVER_FILE, "w", encoding="utf-8") as f:
+        json.dump(body, f)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/strategy/settings", methods=["GET"])
+def get_strategy_settings():
+    return jsonify(load_strategy_settings())
+
+
+@app.route("/api/strategy/settings", methods=["POST"])
+def post_strategy_settings():
+    body = request.get_json(force=True) or {}
+    return jsonify(save_strategy_settings(body))
+
+
+def _query_ha_hourly_consumption(days: int = 21) -> list[dict]:
+    """
+    Fallback consumption profile from HA history when InfluxDB data is sparse.
+    Integrates HA history for net_power + solar_power slots to derive house_wh per hour-of-day.
+    Returns [{hour: int, avg_wh: float}] averaged over `days` days.
+    Falls back to influx_source.json entity_ids if flow_cfg has no HA sensors.
+    """
+    ha_s = _ha_settings()
+    if not ha_s.get("token") or not ha_s.get("url"):
+        log.debug("HA history fallback: no HA token/URL configured")
+        return []
+
+    flow_cfg: dict = {}
+    try:
+        with open(FLOW_CFG_SERVER_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        for k, v in raw.items():
+            flow_cfg[k] = v if isinstance(v, list) else [v]
+    except Exception as exc:
+        log.debug("HA history fallback: could not read flow_cfg: %s", exc)
+
+    def ha_entries_for_slot(slot_key):
+        return [(e["sensor"], e.get("invert", False), 1.0)
+                for e in flow_cfg.get(slot_key, [])
+                if e.get("source") == "homeassistant" and e.get("sensor")]
+
+    net_entities = ha_entries_for_slot("net_power")
+    sol_entities = ha_entries_for_slot("solar_power")
+
+    # Fallback: use influx_source.json entity_ids if flow_cfg has no HA entities
+    if not net_entities and not sol_entities:
+        log.debug("HA history fallback: flow_cfg has no HA entities, trying influx_source.json")
+        src = _load_influx_source()
+        mappings = src.get("mappings", {})
+
+        def _src_entries(key):
+            m = mappings.get(key)
+            if not m:
+                return []
+            entries = m if isinstance(m, list) else [m]
+            result = []
+            for e in entries:
+                tv = e.get("tag_value", "")
+                if tv:
+                    sensor_id = f"sensor.{tv}"
+                    invert    = bool(e.get("invert", False))
+                    scale     = float(e.get("scale", 1) or 1)
+                    result.append((sensor_id, invert, scale))
+            return result
+
+        net_entities = _src_entries("net_w")
+        sol_entities = _src_entries("solar_w")
+        log.debug("HA history fallback: influx_source net=%s sol=%s",
+                  [e[0] for e in net_entities], [e[0] for e in sol_entities])
+
+    all_eids = list({eid for eid, _, _ in net_entities + sol_entities})
+
+    if not all_eids:
+        log.debug("HA history fallback: no entities found in flow_cfg or influx_source")
+        return []
+
+    headers  = _ha_headers(ha_s["token"])
+    base_url = ha_s["url"].rstrip("/")
+    # Cap at 7 days to avoid huge responses that time out (4000+ records/day/sensor)
+    ha_days  = min(days, 7)
+    start_dt = datetime.now(timezone.utc) - timedelta(days=ha_days)
+    tz_name  = _entsoe_settings().get("timezone", "Europe/Brussels")
+    tz_local = ZoneInfo(tz_name)
+
+    log.debug("HA history fallback: querying %d entities for %d days from %s",
+              len(all_eids), ha_days, start_dt.strftime("%Y-%m-%d"))
+
+    # Integrate each entity's power (W) history → Wh per (date, hour) bucket
+    entity_hourly: dict[str, dict] = {}
+
+    for eid in all_eids:
+        try:
+            r = _req.get(
+                f"{base_url}/api/history/period/{start_dt.isoformat()}",
+                headers=headers,
+                params={"filter_entity_id": eid,
+                        "minimal_response": "true",
+                        "no_attributes": "true"},
+                timeout=60,
+                verify=False,
+            )
+            if not r.ok:
+                log.warning("HA history %s → HTTP %s", eid, r.status_code)
+                continue
+            history = r.json()
+            if not history or not history[0]:
+                continue
+            states = history[0]
+
+            # Find scale for this entity (default 1.0 — kW sensors have scale=1000)
+            eid_scale = 1.0
+            for _eid, _inv, _sc in net_entities + sol_entities:
+                if _eid == eid:
+                    eid_scale = _sc
+                    break
+
+            hourly: dict = {}   # (date_str, hour) → Wh
+            prev_t = prev_p = None
+
+            for record in states:
+                try:
+                    t = datetime.fromisoformat(record["last_changed"].replace("Z", "+00:00"))
+                    p = float(record["state"]) * eid_scale
+                except (KeyError, ValueError, TypeError):
+                    prev_t = prev_p = None
+                    continue
+
+                if prev_t is not None and prev_p is not None:
+                    delta_h = (t - prev_t).total_seconds() / 3600.0
+                    wh = prev_p * delta_h
+                    local_prev = prev_t.astimezone(tz_local)
+                    key = (local_prev.date().isoformat(), local_prev.hour)
+                    hourly[key] = hourly.get(key, 0.0) + wh
+
+                prev_t, prev_p = t, p
+
+            entity_hourly[eid] = hourly
+            log.debug("HA history %s: %d hour-buckets", eid, len(hourly))
+        except Exception as exc:
+            log.warning("HA history query failed for %s: %s", eid, exc)
+
+    if not entity_hourly:
+        return []
+
+    # Collect all (date, hour) keys present
+    all_keys: set = set()
+    for d in entity_hourly.values():
+        all_keys.update(d.keys())
+
+    by_hour_of_day: dict[int, list] = {h: [] for h in range(24)}
+
+    for date_str, hour in all_keys:
+        key = (date_str, hour)
+
+        solar_wh = sum(
+            (-entity_hourly[eid].get(key, 0.0) if inv else entity_hourly[eid].get(key, 0.0))
+            for eid, inv, _sc in sol_entities
+            if eid in entity_hourly
+        )
+        net_wh = sum(
+            (-entity_hourly[eid].get(key, 0.0) if inv else entity_hourly[eid].get(key, 0.0))
+            for eid, inv, _sc in net_entities
+            if eid in entity_hourly
+        )
+        # house ≈ solar + grid_import (battery not tracked here)
+        house_wh = solar_wh + max(net_wh, 0.0)
+        if house_wh >= 0:
+            by_hour_of_day[hour].append(house_wh)
+
+    result = []
+    for hour in range(24):
+        vals = by_hour_of_day[hour]
+        if vals:
+            result.append({"hour": hour, "avg_wh": round(sum(vals) / len(vals), 1)})
+
+    result.sort(key=lambda x: x["hour"])
+    log.info("HA consumption history: %d hour-of-day buckets from %d days", len(result), days)
+    return result
+
+
+@app.route("/api/strategy/plan")
+def get_strategy_plan():
+    """Return the charging plan. ?date=YYYY-MM-DD for historical single-day view."""
+    s = load_strategy_settings()
+    tz_name    = _entsoe_settings().get("timezone", "Europe/Brussels")
+    today_str  = date.today().isoformat()
+
+    date_param = request.args.get("date", "").strip()
+    is_historical = bool(date_param) and date_param < today_str
+    target_date   = date_param if date_param else today_str
+
+    # ── Prices ────────────────────────────────────────────────────────────
+    prices = []
+    es = _entsoe_settings()
+    if es.get("apiKey"):
+        try:
+            target_d   = date.fromisoformat(target_date)
+            prices    += _fetch_entsoe_day(es["apiKey"], target_d, es.get("country","BE"), es.get("timezone"))
+            if not date_param:
+                # Forward mode: also fetch tomorrow
+                prices += _fetch_entsoe_day(es["apiKey"], target_d + timedelta(days=1),
+                                            es.get("country","BE"), es.get("timezone"))
+        except Exception as exc:
+            log.warning("Strategy: ENTSO-E fetch error: %s", exc)
+
+    if is_historical:
+        # ── Historical mode: use InfluxDB actuals ─────────────────────────
+        actuals = query_day_actuals(target_date, tz_name)   # {hour: {solar_w, house_w, bat_soc, ...}}
+        influx_available = len(actuals) > 0
+
+        # Build solar_wh from actuals (W mean × 1 h = Wh)
+        tz_obj   = ZoneInfo(tz_name)
+        tgt_d    = date.fromisoformat(target_date)
+        solar_wh: dict = {}
+        consumption_by_hour = []
+        for hour, row in actuals.items():
+            slot_dt  = datetime(tgt_d.year, tgt_d.month, tgt_d.day,
+                                int(hour), 0, 0, tzinfo=tz_obj)
+            slot_key = slot_dt.isoformat()
+            if "solar_w" in row:
+                solar_wh[slot_key] = row["solar_w"]       # W mean ≈ Wh for 1-hour window
+            if "house_w" in row:
+                consumption_by_hour.append({"hour": int(hour), "avg_wh": row["house_w"]})
+
+        # SOC at start of day (hour 0 reading, or first available)
+        soc_now = 50.0
+        for h in range(24):
+            if h in actuals and "bat_soc" in actuals[h]:
+                soc_now = actuals[h]["bat_soc"]
+                break
+
+        start_dt = datetime(tgt_d.year, tgt_d.month, tgt_d.day, 0, 0, 0, tzinfo=tz_obj)
+        plan_slots = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s,
+                                start_dt=start_dt, num_slots=24)
+
+        # Serialise actuals keyed by hour string for JSON transport
+        actuals_out = {str(h): v for h, v in actuals.items()}
+
+        return jsonify({
+            "date":              target_date,
+            "is_historical":     True,
+            "slots":             plan_slots,
+            "actuals":           actuals_out,
+            "influx_available":  influx_available,
+            "prices_available":  len(prices) > 0,
+            "solar_available":   bool(solar_wh),
+            "soc_now":           soc_now,
+            "consumption_by_hour": consumption_by_hour,
+        })
+
+    # ── Forward mode (today + tomorrow) ───────────────────────────────────
+    solar_wh = {}
+    fs = _forecast_settings()
+    if fs.get("lat") and fs.get("lon"):
+        try:
+            forecast_result = _fetch_forecast(fs)
+            solar_wh = forecast_result.get("watt_hours_period", {})
+        except Exception as exc:
+            log.warning("Strategy: forecast fetch error: %s", exc)
+
+    history_days = s.get("history_days", 21)
+    ext_src = _load_influx_source()
+    ext_configured = bool(ext_src.get("mappings") and ext_src.get("database"))
+
+    # ── Consumption profile ──────────────────────────────────────────────
+    # Priority: external InfluxDB (HA) if configured → local Marstek InfluxDB → HA REST API
+    consumption_by_hour = []
+    consumption_source  = "none"
+
+    if ext_configured:
+        ext_consumption = _query_external_influx_consumption(days=history_days)
+        if len(ext_consumption) >= 18:
+            consumption_by_hour = ext_consumption
+            consumption_source  = "external_influx"
+            log.info("Consumption from external InfluxDB (%d hours)", len(ext_consumption))
+
+    if not consumption_by_hour:
+        local_consumption = query_avg_hourly_consumption(days=history_days)
+        if len(local_consumption) >= 18:
+            consumption_by_hour = local_consumption
+            consumption_source  = "local_influx"
+            log.info("Consumption from local Marstek InfluxDB (%d hours)", len(local_consumption))
+
+    if not consumption_by_hour:
+        log.info("Both InfluxDBs sparse – trying HA history API")
+        ha_consumption = _query_ha_hourly_consumption(days=history_days)
+        if ha_consumption:
+            consumption_by_hour = ha_consumption
+            consumption_source  = "ha_history"
+            log.info("Consumption from HA history API (%d hours)", len(ha_consumption))
+
+    log.info("Consumption source: %s  (%d/24 hours)", consumption_source, len(consumption_by_hour))
+
+    # ── Current SOC ──────────────────────────────────────────────────────
+    # Priority: external InfluxDB (HA) if configured → local Marstek InfluxDB → ESPHome SSE
+    soc_now = None
+
+    if ext_configured:
+        try:
+            ext_socs = _query_external_influx_slot_latest("bat_soc")
+            if ext_socs:
+                soc_now = sum(ext_socs) / len(ext_socs)
+                log.debug("SOC from external InfluxDB: %.1f%% (%d batteries)", soc_now, len(ext_socs))
+        except Exception as exc:
+            log.debug("External InfluxDB SOC failed: %s", exc)
+
+    if soc_now is None:
+        try:
+            recent  = query_recent_points(hours=1)
+            soc_now = next((p["bat_soc"] for p in reversed(recent) if "bat_soc" in p), None)
+            if soc_now is not None:
+                log.debug("SOC from local Marstek InfluxDB: %.1f%%", soc_now)
+        except Exception:
+            pass
+
+    if soc_now is None:
+        try:
+            from influx_writer import _poll_esphome, _resolve_slot
+            devices_dict = load_devices()
+            live_cfg: dict = {}
+            try:
+                with open(FLOW_CFG_SERVER_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                for k, v in raw.items():
+                    live_cfg[k] = v if isinstance(v, list) else [v]
+            except Exception:
+                pass
+            soc_entries = live_cfg.get("bat_soc", [])
+            if soc_entries:
+                # Poll ESPHome devices via SSE
+                esphome_map = _poll_esphome(devices_dict)
+
+                # Also fetch HA entities needed for bat_soc resolution
+                ha_soc_data: dict = {}
+                ha_s = _ha_settings()
+                if ha_s.get("token") and ha_s.get("url"):
+                    ha_eids = [e["sensor"] for e in soc_entries
+                               if e.get("source") == "homeassistant" and e.get("sensor")]
+                    if ha_eids:
+                        headers = _ha_headers(ha_s["token"])
+                        for eid in ha_eids:
+                            try:
+                                r = _req.get(f"{ha_s['url']}/api/states/{eid}",
+                                             headers=headers, timeout=4, verify=False)
+                                if r.ok:
+                                    d = r.json()
+                                    try:
+                                        v = float(d.get("state", ""))
+                                    except Exception:
+                                        v = None
+                                    ha_soc_data[eid] = {"value": v}
+                            except Exception:
+                                pass
+
+                soc_val = _resolve_slot("bat_soc", live_cfg, esphome_map, None, ha_soc_data)
+                if soc_val is not None:
+                    soc_now = float(soc_val)
+                    log.debug("SOC from live poll: %.1f%%", soc_now)
+        except Exception as exc:
+            log.warning("SOC live poll fallback failed: %s", exc)
+
+    if soc_now is None:
+        soc_now = 50.0
+
+    plan   = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s)
+    result = split_days(plan)
+    result["consumption_by_hour"] = consumption_by_hour
+    result["prices_available"]    = len(prices) > 0
+    result["solar_available"]     = len(solar_wh) > 0
+    result["soc_now"]             = soc_now
+    result["is_historical"]       = False
+    result["consumption_source"]  = consumption_source
+    # Cache forward plan for automation (non-historical only)
+    _plan_cache["slots"]      = result.get("slots", [])
+    _plan_cache["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    return jsonify(result)
+
+
+@app.route("/api/strategy/history")
+def get_strategy_history():
+    """Return averaged hourly consumption profile (last N days)."""
+    days = int(request.args.get("days", 21))
+    data = query_avg_hourly_consumption(days=days)
+    return jsonify({"hours": data})
+
+
+@app.route("/api/influx/recent")
+def get_influx_recent():
+    """Return last N hours of energy flow data from InfluxDB."""
+    hours = int(request.args.get("hours", 24))
+    data  = query_recent_points(hours=hours)
+    return jsonify({"points": data})
+
+
+@app.route("/api/influx/status")
+def get_influx_status():
+    """Check InfluxDB connectivity."""
+    try:
+        from influxdb_client import InfluxDBClient  # type: ignore
+        from influx_writer import INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        health = client.health()
+        return jsonify({"ok": True, "status": health.status, "url": INFLUX_URL,
+                        "bucket": INFLUX_BUCKET, "org": INFLUX_ORG})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# InfluxDB connection scanner  (v1 + v2)
+# ---------------------------------------------------------------------------
+
+INFLUX_CONN_FILE = os.path.join(BASE_DIR, "influx_connection.json")
+
+def _load_influx_conn() -> dict:
+    try:
+        with open(INFLUX_CONN_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+@app.route("/api/influx/connection", methods=["GET"])
+def get_influx_connection():
+    conn = _load_influx_conn()
+    # Never expose password in plaintext over API – mask it
+    safe = dict(conn)
+    if safe.get("password"):
+        safe["password"] = "••••••••"
+    if safe.get("token"):
+        safe["token"] = f"…{conn['token'][-6:]}" if len(conn.get("token","")) > 6 else "••••••"
+    return jsonify(safe)
+
+
+@app.route("/api/influx/connection", methods=["POST"])
+def save_influx_connection():
+    body    = request.get_json(force=True) or {}
+    current = _load_influx_conn()
+    # Keep existing secret if caller sends masked placeholder
+    if body.get("password", "").startswith("•"):
+        body["password"] = current.get("password", "")
+    if body.get("token", "").startswith("…") or body.get("token", "").startswith("•"):
+        body["token"] = current.get("token", "")
+    current.update({k: v for k, v in body.items() if v != ""})
+    with open(INFLUX_CONN_FILE, "w", encoding="utf-8") as f:
+        json.dump(current, f, indent=2)
+    return jsonify({"ok": True})
+
+
+def _influx_v1_query(url: str, username: str, password: str,
+                     q: str, db: str = "") -> dict:
+    """Execute an InfluxQL query against a v1 server and return parsed JSON."""
+    params = {"q": q}
+    if db:
+        params["db"] = db
+    r = _req.get(
+        f"{url.rstrip('/')}/query",
+        params=params,
+        auth=(username, password) if username else None,
+        timeout=10,
+        verify=False,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _influx_v1_results(data: dict) -> list:
+    """Flatten InfluxQL result rows into a flat list of strings."""
+    out = []
+    for result in data.get("results", []):
+        for series in result.get("series", []):
+            for row in series.get("values", []):
+                if row:
+                    out.append(row[0])
+    return out
+
+
+@app.route("/api/influx/scan", methods=["POST"])
+def influx_scan():
+    """
+    Discover InfluxDB structure. Supports v1 (InfluxQL) and v2 (Flux).
+    Body:
+      url, version ("auto"|"v1"|"v2"), username, password, token, org,
+      database (v1) or bucket (v2) to drill into,
+      measurement to list fields for.
+    """
+    body     = request.get_json(force=True) or {}
+    conn     = _load_influx_conn()
+
+    url      = (body.get("url")      or conn.get("url", "")).rstrip("/")
+    version  = (body.get("version")  or conn.get("version", "auto")).lower()
+    username = body.get("username")  or conn.get("username", "")
+    password = body.get("password")  or conn.get("password", "")
+    token    = body.get("token")     or conn.get("token", "")
+    org      = body.get("org")       or conn.get("org", "")
+    database = body.get("database")  or ""
+    bucket   = body.get("bucket")    or ""
+    measurement = body.get("measurement") or ""
+
+    if not url:
+        return jsonify({"error": "Geen URL opgegeven."}), 400
+
+    # ── Auto-detect version ─────────────────────────────────────────────────
+    detected = version
+    if version == "auto":
+        try:
+            r2 = _req.get(f"{url}/api/v2/ping", timeout=5, verify=False)
+            if r2.status_code < 400:
+                detected = "v2"
+            else:
+                detected = "v1"
+        except Exception:
+            try:
+                r1 = _req.get(f"{url}/ping", timeout=5, verify=False)
+                if r1.status_code < 400:
+                    detected = "v1"
+                else:
+                    return jsonify({"error": f"Geen reactie op {url}"}), 502
+            except Exception as exc:
+                return jsonify({"error": f"Verbinding mislukt: {exc}"}), 502
+
+    result: dict = {"version": detected, "url": url}
+
+    # ── InfluxDB v1 ──────────────────────────────────────────────────────────
+    if detected == "v1":
+        try:
+            if measurement and database:
+                # Fetch field keys and tag keys for this measurement
+                fdata = _influx_v1_query(url, username, password,
+                                         f'SHOW FIELD KEYS FROM "{measurement}"', db=database)
+                tdata = _influx_v1_query(url, username, password,
+                                         f'SHOW TAG KEYS FROM "{measurement}"',   db=database)
+                fields, tags = [], []
+                for res in fdata.get("results", []):
+                    for series in res.get("series", []):
+                        for row in series.get("values", []):
+                            if row:
+                                fields.append({"key": row[0], "type": row[1] if len(row) > 1 else "?"})
+                for res in tdata.get("results", []):
+                    for series in res.get("series", []):
+                        for row in series.get("values", []):
+                            if row:
+                                tags.append(row[0])
+                # Also fetch a sample row so user can see entity_id tag values
+                sdata = _influx_v1_query(url, username, password,
+                                         f'SELECT * FROM "{measurement}" ORDER BY time DESC LIMIT 3',
+                                         db=database)
+                sample_rows = []
+                for res in sdata.get("results", []):
+                    for series in res.get("series", []):
+                        cols = series.get("columns", [])
+                        for row in series.get("values", []):
+                            sample_rows.append(dict(zip(cols, row)))
+                result.update({"database": database, "measurement": measurement,
+                                "fields": fields, "tags": tags, "sample": sample_rows})
+
+            elif database:
+                # List measurements in this database
+                data = _influx_v1_query(url, username, password,
+                                        "SHOW MEASUREMENTS", db=database)
+                measurements = _influx_v1_results(data)
+                # Also get retention policies
+                rpdata = _influx_v1_query(url, username, password,
+                                          "SHOW RETENTION POLICIES", db=database)
+                rps = []
+                for res in rpdata.get("results", []):
+                    for series in res.get("series", []):
+                        cols = series.get("columns", [])
+                        for row in series.get("values", []):
+                            rps.append(dict(zip(cols, row)))
+                result.update({"database": database,
+                                "measurements": measurements,
+                                "retention_policies": rps,
+                                "measurement_count": len(measurements)})
+            else:
+                # List databases
+                data = _influx_v1_query(url, username, password, "SHOW DATABASES")
+                databases = [d for d in _influx_v1_results(data) if not d.startswith("_")]
+                result["databases"] = databases
+
+        except Exception as exc:
+            return jsonify({"error": f"InfluxDB v1 fout: {exc}"}), 500
+
+    # ── InfluxDB v2 ──────────────────────────────────────────────────────────
+    elif detected == "v2":
+        if not token:
+            return jsonify({"error": "Token vereist voor InfluxDB v2."}), 400
+        headers = {"Authorization": f"Token {token}", "Content-Type": "application/json"}
+
+        try:
+            if measurement and (bucket or database):
+                b = bucket or database
+                flux = (
+                    f'import "influxdata/influxdb/schema"\n'
+                    f'schema.measurementFieldKeys(bucket: "{b}", measurement: "{measurement}")'
+                )
+                flux_tag = (
+                    f'import "influxdata/influxdb/schema"\n'
+                    f'schema.measurementTagKeys(bucket: "{b}", measurement: "{measurement}")'
+                )
+                def _flux_query(q):
+                    r = _req.post(f"{url}/api/v2/query",
+                                  headers=headers, params={"org": org},
+                                  json={"query": q, "type": "flux"}, timeout=15, verify=False)
+                    r.raise_for_status()
+                    rows = []
+                    for line in r.text.splitlines():
+                        if line.startswith("#") or not line.strip():
+                            continue
+                        parts = line.split(",")
+                        if len(parts) > 3:
+                            rows.append(parts[-1].strip())
+                    return rows
+                fields = [{"key": k, "type": "?"} for k in _flux_query(flux) if k and k != "_value"]
+                tags   = [t for t in _flux_query(flux_tag) if t and not t.startswith("_")]
+                result.update({"bucket": b, "measurement": measurement,
+                                "fields": fields, "tags": tags})
+
+            elif bucket or database:
+                b = bucket or database
+                flux = (
+                    f'import "influxdata/influxdb/schema"\n'
+                    f'schema.measurements(bucket: "{b}")'
+                )
+                r2 = _req.post(f"{url}/api/v2/query",
+                               headers=headers, params={"org": org},
+                               json={"query": flux, "type": "flux"}, timeout=15, verify=False)
+                r2.raise_for_status()
+                measurements = []
+                for line in r2.text.splitlines():
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    parts = line.split(",")
+                    if len(parts) > 3:
+                        val = parts[-1].strip()
+                        if val and val != "_value":
+                            measurements.append(val)
+                result.update({"bucket": b, "measurements": measurements,
+                                "measurement_count": len(measurements)})
+
+            else:
+                # List buckets
+                r2 = _req.get(f"{url}/api/v2/buckets", headers=headers,
+                               params={"org": org} if org else {}, timeout=10, verify=False)
+                r2.raise_for_status()
+                data = r2.json()
+                buckets = [{"name": b["name"], "id": b["id"]}
+                           for b in data.get("buckets", [])
+                           if not b["name"].startswith("_")]
+                # Also list orgs
+                ro = _req.get(f"{url}/api/v2/orgs", headers=headers, timeout=10, verify=False)
+                orgs = [o["name"] for o in ro.json().get("orgs", [])] if ro.ok else []
+                result.update({"buckets": buckets, "orgs": orgs})
+
+        except Exception as exc:
+            return jsonify({"error": f"InfluxDB v2 fout: {exc}"}), 500
+
+    else:
+        return jsonify({"error": f"Onbekende versie: {detected}"}), 400
+
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# InfluxDB source mapping  (which fields to use for strategy queries)
+# ---------------------------------------------------------------------------
+
+INFLUX_SOURCE_FILE = os.path.join(BASE_DIR, "influx_source.json")
+
+
+def _load_influx_source() -> dict:
+    try:
+        with open(INFLUX_SOURCE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+@app.route("/api/influx/source", methods=["GET"])
+def get_influx_source():
+    return jsonify(_load_influx_source())
+
+
+@app.route("/api/influx/source", methods=["POST"])
+def save_influx_source():
+    body = request.get_json(force=True) or {}
+    current = _load_influx_source()
+    current.update(body)
+    with open(INFLUX_SOURCE_FILE, "w", encoding="utf-8") as f:
+        json.dump(current, f, indent=2)
+    return jsonify({"ok": True})
+
+
+def _query_external_influx_consumption(days: int = 21) -> list[dict]:
+    """
+    Query the user-configured external InfluxDB for hourly house consumption.
+    Uses influx_source.json mappings.  Supports v1 (InfluxQL) and v2 (Flux).
+    Returns [{hour: int, avg_wh: float}] same as query_avg_hourly_consumption().
+    """
+    src  = _load_influx_source()
+    conn = _load_influx_conn()
+    if not src.get("mappings"):
+        return []
+
+    house_m = src["mappings"].get("house_w")
+    if not house_m or not house_m.get("field"):
+        return []
+
+    url      = src.get("url") or conn.get("url", "")
+    version  = src.get("version") or conn.get("version", "v1")
+    database = src.get("database", "")
+    username = conn.get("username", "")
+    password = conn.get("password", "")
+    token    = conn.get("token", "")
+    org      = conn.get("org", "")
+
+    if not url:
+        return []
+
+    field      = house_m["field"]
+    tag_key    = house_m.get("tag_key", "")
+    tag_value  = house_m.get("tag_value", "")
+    invert     = house_m.get("invert", False)
+    scale      = float(house_m.get("scale", 1) or 1)
+    meas       = house_m.get("measurement") or src.get("measurement", "")
+
+    sign = -1 if invert else 1
+
+    try:
+        tz_name = _entsoe_settings().get("timezone", "Europe/Brussels")
+
+        if version == "v1":
+            where_parts = []
+            if tag_key and tag_value:
+                where_parts.append(f'"{tag_key}" = \'{tag_value}\'')
+            where_parts.append(f"time > now() - {days}d")
+            where_clause = " AND ".join(where_parts)
+
+            q = (f'SELECT mean("{field}") AS val FROM "{meas}"'
+                 f' WHERE {where_clause}'
+                 f' GROUP BY time(1h) fill(none) tz(\'{tz_name}\')')
+
+            data = _influx_v1_query(url, username, password, q, db=database)
+            by_hour: dict[int, list] = {h: [] for h in range(24)}
+            for res in data.get("results", []):
+                for series in res.get("series", []):
+                    cols = series.get("columns", [])
+                    for row in series.get("values", []):
+                        d = dict(zip(cols, row))
+                        v = d.get("val") or d.get("mean")
+                        if v is None:
+                            continue
+                        try:
+                            t = datetime.fromisoformat(d["time"].replace("Z", "+00:00"))
+                            t_local = t.astimezone(ZoneInfo(tz_name))
+                            by_hour[t_local.hour].append(float(v) * sign * scale)
+                        except Exception:
+                            pass
+
+        elif version == "v2":
+            if not token:
+                return []
+            headers = {"Authorization": f"Token {token}", "Content-Type": "application/json"}
+            tag_filter = f' |> filter(fn: (r) => r["{tag_key}"] == "{tag_value}")' if tag_key and tag_value else ""
+            flux = (
+                f'from(bucket: "{database}")\n'
+                f'  |> range(start: -{days}d)\n'
+                f'  |> filter(fn: (r) => r._measurement == "{meas}" and r._field == "{field}"){tag_filter}\n'
+                f'  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)\n'
+                f'  |> map(fn: (r) => ({{r with _value: r._value * {sign * scale}}}))'
+            )
+            r = _req.post(f"{url.rstrip('/')}/api/v2/query",
+                          headers=headers, params={"org": org},
+                          json={"query": flux, "type": "flux"}, timeout=30, verify=False)
+            r.raise_for_status()
+            by_hour = {h: [] for h in range(24)}
+            for line in r.text.splitlines():
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.split(",")
+                if len(parts) < 6:
+                    continue
+                try:
+                    t = datetime.fromisoformat(parts[5].strip().replace("Z", "+00:00"))
+                    t_local = t.astimezone(ZoneInfo(tz_name))
+                    v = float(parts[-1].strip())
+                    by_hour[t_local.hour].append(v)
+                except Exception:
+                    pass
+        else:
+            return []
+
+        result = []
+        for hour in range(24):
+            vals = by_hour[hour]
+            if vals:
+                result.append({"hour": hour, "avg_wh": round(sum(vals) / len(vals), 1)})
+        log.info("External InfluxDB consumption: %d hours from %s", len(result), url)
+        return result
+
+    except Exception as exc:
+        log.warning("External InfluxDB consumption query failed: %s", exc)
+        return []
+
+
+def _query_external_influx_slot_latest(slot_key: str) -> list[float]:
+    """
+    Fetch the most recent value(s) for a slot from the external InfluxDB.
+    Returns a list of floats (one per battery entry for multi slots, one item otherwise).
+    Used to get current bat_soc from external InfluxDB when ESPHome/Marstek InfluxDB has no data.
+    """
+    src  = _load_influx_source()
+    conn = _load_influx_conn()
+    if not src.get("mappings"):
+        return []
+
+    raw = src["mappings"].get(slot_key)
+    if not raw:
+        return []
+
+    # Normalise to list
+    entries = raw if isinstance(raw, list) else [raw]
+    entries = [e for e in entries if e.get("field")]
+    if not entries:
+        return []
+
+    url      = src.get("url") or conn.get("url", "")
+    version  = src.get("version") or conn.get("version", "v1")
+    database = src.get("database", "")
+    username = conn.get("username", "")
+    password = conn.get("password", "")
+    token    = conn.get("token", "")
+    org      = conn.get("org", "")
+
+    if not url:
+        return []
+
+    results = []
+    for entry in entries:
+        field     = entry["field"]
+        tag_key   = entry.get("tag_key", "")
+        tag_value = entry.get("tag_value", "")
+        invert    = entry.get("invert", False)
+        scale     = float(entry.get("scale", 1) or 1)
+        meas      = entry.get("measurement") or src.get("measurement", "")
+        sign      = -1 if invert else 1
+        try:
+            if version == "v1":
+                where_parts = []
+                if tag_key and tag_value:
+                    where_parts.append(f'"{tag_key}" = \'{tag_value}\'')
+                where_str = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+                q = f'SELECT last("{field}") FROM "{meas}"{where_str}'
+                data = _influx_v1_query(url, username, password, q, db=database)
+                for res in data.get("results", []):
+                    for series in res.get("series", []):
+                        for row in series.get("values", []):
+                            v = row[1] if len(row) > 1 else None
+                            if v is not None:
+                                results.append(float(v) * sign * scale)
+            elif version == "v2":
+                if not token:
+                    continue
+                headers = {"Authorization": f"Token {token}", "Content-Type": "application/json"}
+                tag_filter = f' |> filter(fn: (r) => r["{tag_key}"] == "{tag_value}")' if tag_key and tag_value else ""
+                flux = (
+                    f'from(bucket: "{database}")\n'
+                    f'  |> range(start: -1h)\n'
+                    f'  |> filter(fn: (r) => r._measurement == "{meas}" and r._field == "{field}"){tag_filter}\n'
+                    f'  |> last()'
+                )
+                r = _req.post(f"{url.rstrip('/')}/api/v2/query",
+                              headers=headers, params={"org": org},
+                              json={"query": flux, "type": "flux"}, timeout=10, verify=False)
+                r.raise_for_status()
+                for line in r.text.splitlines():
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    parts = line.split(",")
+                    if len(parts) < 4:
+                        continue
+                    try:
+                        v = float(parts[-1].strip())
+                        results.append(v * sign * scale)
+                        break
+                    except Exception:
+                        pass
+        except Exception as exc:
+            log.debug("External InfluxDB slot latest [%s] failed: %s", slot_key, exc)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Serve React frontend (production build)
+# ---------------------------------------------------------------------------
+
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_frontend(path):
+    dist = os.path.abspath(FRONTEND_DIST)
+    if not os.path.isdir(dist):
+        return jsonify({"error": "Frontend not built. Run 'npm run build' in frontend/."}), 404
+
+    full_path = os.path.join(dist, path)
+    if path and os.path.isfile(full_path):
+        return send_from_directory(dist, path)
+
+    index = os.path.join(dist, "index.html")
+    if os.path.isfile(index):
+        return send_from_directory(dist, "index.html")
+
+    abort(404)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def _influx_context():
+    """Collect current data for the InfluxDB background writer."""
+    devices  = load_devices()
+    flow_cfg: dict = {}
+    try:
+        with open(FLOW_CFG_SERVER_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        for key, val in raw.items():
+            if isinstance(val, list):
+                flow_cfg[key] = val
+            elif isinstance(val, dict):
+                flow_cfg[key] = [val]
+    except Exception:
+        pass
+
+    # Poll HomeWizard
+    hw_data = None
+    try:
+        hw_devs = {}
+        for dev_id, dev in (json.load(open(os.path.join(BASE_DIR, "homewizard_devices.json")))
+                            if os.path.exists(os.path.join(BASE_DIR, "homewizard_devices.json"))
+                            else {}).items():
+            selected = dev.get("selected_sensors") or []
+            try:
+                r = _req.get(f"http://{dev['ip']}/api", timeout=3)
+                if r.ok:
+                    data = r.json()
+                    sensors = {}
+                    for k, v in data.items():
+                        if k in selected and isinstance(v, (int, float)):
+                            meta = _hw_sensor_meta(k)
+                            sensors[k] = {"label": meta["label"], "unit": meta["unit"], "value": v}
+                    hw_devs[dev_id] = {"id": dev_id, "name": dev.get("name",""), "sensors": sensors}
+            except Exception:
+                pass
+        if hw_devs:
+            hw_data = {"devices": list(hw_devs.values())}
+    except Exception:
+        pass
+
+    # Poll HA for configured sensors
+    ha_data: dict = {}
+    ha_s = _ha_settings()
+    if ha_s.get("token") and ha_s.get("url"):
+        ha_entity_ids = list({
+            sc["sensor"]
+            for entries in flow_cfg.values()
+            for sc in (entries if isinstance(entries, list) else [entries])
+            if sc.get("source") == "homeassistant" and sc.get("sensor")
+        })
+        if ha_entity_ids:
+            headers = _ha_headers(ha_s["token"])
+            def _fetch_ha(eid):
+                try:
+                    r = _req.get(f"{ha_s['url']}/api/states/{eid}",
+                                 headers=headers, timeout=4, verify=False)
+                    if r.ok:
+                        d = r.json()
+                        try:
+                            v = float(d.get("state",""))
+                        except Exception:
+                            v = None
+                        return eid, {"value": v, "unit": d.get("attributes",{}).get("unit_of_measurement","")}
+                except Exception:
+                    pass
+                return eid, None
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                for eid, val in pool.map(_fetch_ha, ha_entity_ids):
+                    if val is not None:
+                        ha_data[eid] = val
+
+    return {"devices": devices, "hw_data": hw_data, "ha_data": ha_data, "flow_cfg": flow_cfg}
+
+
+# ---------------------------------------------------------------------------
+# Automation – automatically apply strategy actions to batteries
+# ---------------------------------------------------------------------------
+
+AUTOMATION_FILE = os.path.join(BASE_DIR, "automation.json")
+
+# Cache the last computed strategy plan (set by get_strategy_plan)
+_plan_cache: dict = {"slots": [], "fetched_at": None}
+
+# action → list of (domain, entity_name, value) commands
+# U+2044 FRACTION SLASH is used in ESPHome entity name "Forcible Charge⁄Discharge"
+_FORCIBLE = "Marstek Forcible Charge\u2044Discharge"
+_AUTOMATION_MODES: dict[str, list] = {
+    "solar_charge": [
+        ("select", "Marstek User Work Mode", "anti-feed"),
+        ("select", _FORCIBLE,                "stop"),
+    ],
+    "grid_charge": [
+        ("select", "Marstek User Work Mode", "manual"),
+        ("select", _FORCIBLE,                "charge"),
+    ],
+    "save": [
+        ("select", "Marstek User Work Mode", "manual"),
+        ("select", _FORCIBLE,                "stop"),
+    ],
+    "discharge": [
+        ("select", "Marstek User Work Mode", "anti-feed"),
+        ("select", _FORCIBLE,                "stop"),
+    ],
+    "neutral": [
+        ("select", "Marstek User Work Mode", "anti-feed"),
+        ("select", _FORCIBLE,                "stop"),
+    ],
+}
+
+
+def _load_automation() -> dict:
+    try:
+        with open(AUTOMATION_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"enabled": False, "last_action": None, "last_applied": None}
+
+
+def _save_automation(data: dict) -> None:
+    with open(AUTOMATION_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def _current_slot_action() -> str | None:
+    """Return the action for the current hour from the cached plan."""
+    slots = _plan_cache.get("slots", [])
+    if not slots:
+        return None
+    tz_name = _entsoe_settings().get("timezone", "Europe/Brussels")
+    now_local = datetime.now(ZoneInfo(tz_name))
+    for slot in slots:
+        if slot.get("hour") == now_local.hour:
+            return slot.get("action", "neutral")
+    return "neutral"
+
+
+def _automation_tick() -> None:
+    """
+    Run once per minute. Only sends commands when the action changes
+    (i.e. at an hour boundary), avoiding constant chatter to the devices.
+    Also re-applies on first enable and when automation is re-enabled.
+    """
+    auto = _load_automation()
+    if not auto.get("enabled"):
+        return
+
+    action = _current_slot_action()
+    if action is None:
+        log.debug("Automation: no plan cached yet – skipping")
+        return
+
+    prev_action = auto.get("last_action")
+    if action == prev_action:
+        log.debug("Automation: action unchanged (%s) – no commands sent", action)
+        return
+
+    commands = _AUTOMATION_MODES.get(action, _AUTOMATION_MODES["neutral"])
+    devices  = load_devices()
+
+    if not devices:
+        log.debug("Automation: no devices configured")
+        return
+
+    log.info("Automation: action changed %s → %s  (devices=%d)",
+             prev_action or "none", action, len(devices))
+    for device_id, device in devices.items():
+        for domain, name, value in commands:
+            result = send_esphome_command(device["ip"], device["port"], domain, name, value)
+            if result.get("ok"):
+                log.info("Automation: ✓ %s → %s=%s  (device %s)", action, name, value, device_id)
+            else:
+                log.warning("Automation: ✗ %s → %s=%s  (device %s): %s",
+                            action, name, value, device_id, result.get("error"))
+
+    auto["last_action"]  = action
+    auto["last_applied"] = datetime.now(timezone.utc).isoformat()
+    _save_automation(auto)
+
+
+def _start_automation_thread(interval: int = 60) -> None:
+    import threading
+
+    def loop():
+        import time as _time
+        while True:
+            try:
+                _automation_tick()
+            except Exception as exc:
+                log.warning("Automation thread error: %s", exc)
+            _time.sleep(interval)
+
+    t = threading.Thread(target=loop, daemon=True, name="automation")
+    t.start()
+    log.info("Automation background thread started (interval=%ds)", interval)
+
+
+@app.route("/api/automation", methods=["GET"])
+def get_automation():
+    data = _load_automation()
+    data["current_action"] = _current_slot_action()
+    return jsonify(data)
+
+
+@app.route("/api/automation", methods=["POST"])
+def set_automation():
+    body = request.get_json(force=True) or {}
+    data = _load_automation()
+    if "enabled" in body:
+        newly_enabled = bool(body["enabled"]) and not data.get("enabled")
+        data["enabled"] = bool(body["enabled"])
+        if newly_enabled:
+            # Clear last_action so the tick immediately applies the current action
+            data["last_action"] = None
+    _save_automation(data)
+    log.info("Automation %s", "ENABLED" if data["enabled"] else "DISABLED")
+    data["current_action"] = _current_slot_action()
+    return jsonify(data)
+
+
+if __name__ == "__main__":
+    # Start InfluxDB background writer
+    start_background_writer(_influx_context, interval=30)
+    # Start automation background thread
+    _start_automation_thread(interval=60)
+    print("Marstek Dashboard → http://localhost:5000")
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
