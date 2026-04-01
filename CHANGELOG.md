@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0] - 2026-04-02
+
+### Fixed
+- InfluxDB scan 401: masked password placeholder (`••••••••`) was sent to
+  InfluxDB instead of the real stored password — now falls back to the
+  stored secret when the UI sends a masked value (same logic as the save endpoint)
+
 ## [1.2.0] - 2026-04-01
 
 ### Fixed
