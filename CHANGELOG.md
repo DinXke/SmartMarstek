@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0] - 2026-04-02
+
+### Fixed
+- HA auto-config now always overwrites a wrong stored URL (e.g. `localhost:8123`)
+  with `http://homeassistant:8123` whenever `SUPERVISOR_TOKEN` is available,
+  unless the user explicitly configured both `ha_url` and `ha_token`
+
 ## [1.6.0] - 2026-04-02
 
 ### Changed
