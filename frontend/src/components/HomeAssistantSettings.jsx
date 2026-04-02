@@ -5,7 +5,7 @@ import { useState, useEffect, useCallback } from "react";
 // ---------------------------------------------------------------------------
 
 export default function HomeAssistantSettings() {
-  const [url,        setUrl]        = useState("");
+  const [url,        setUrl]        = useState("http://homeassistant:8123");
   const [token,      setToken]      = useState("");
   const [configured, setConfigured] = useState(false);
   const [tokenHint,  setTokenHint]  = useState("");
@@ -79,13 +79,13 @@ export default function HomeAssistantSettings() {
       <div className="settings-row">
         <div>
           <div className="settings-row-label">Home Assistant URL</div>
-          <div className="settings-row-desc">bijv. http://192.168.1.10:8123 of https://mijn.ha.nl</div>
+          <div className="settings-row-desc">Standaard correct als add-on. Pas aan bij externe toegang.</div>
         </div>
         <input
           className="form-input"
           style={{ flex: "1 1 260px", maxWidth: 320 }}
           type="url"
-          placeholder="http://192.168.1.10:8123"
+          placeholder="http://homeassistant:8123"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
         />
