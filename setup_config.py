@@ -50,11 +50,21 @@ def main():
     ha_url   = (opts.get("ha_url")   or "").strip()
     ha_token = (opts.get("ha_token") or "").strip()
     if ha_url and ha_token:
+        # Manually configured: use as-is
         write_if_changed(
             os.path.join(DATA_DIR, "ha_settings.json"),
             {"url": ha_url, "token": ha_token},
         )
-    elif ha_url or ha_token:
+    elif not ha_url and not ha_token:
+        # Running as HA add-on: auto-detect via Supervisor
+        supervisor_token = os.environ.get("SUPERVISOR_TOKEN", "").strip()
+        if supervisor_token:
+            write_if_changed(
+                os.path.join(DATA_DIR, "ha_settings.json"),
+                {"url": "http://supervisor/core", "token": supervisor_token},
+            )
+            print("[setup_config] HA: auto-configured via Supervisor token", flush=True)
+    else:
         print("[setup_config] HA: both ha_url and ha_token are required – skipping", flush=True)
 
     # ── ENTSO-E prices ────────────────────────────────────────────────────
