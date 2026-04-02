@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0] - 2026-04-02
+
+### Added
+- Auto-configure Home Assistant via Supervisor token: when `ha_url` and
+  `ha_token` are left blank, the add-on automatically uses `SUPERVISOR_TOKEN`
+  + `http://supervisor/core` so all HA entities are immediately accessible
+  without any manual setup
+
 ## [1.4.0] - 2026-04-02
 
 ### Added
