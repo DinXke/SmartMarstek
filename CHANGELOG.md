@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.0] - 2026-04-02
+
+### Added
+- InfluxDB as a live source option in "Vermogensstroom bronnen": configured slots
+  (Zonnepanelen, Net, Thuisverbruik, Batterij vermogen, Batterij SOC) now appear
+  as a 📊 InfluxDB group alongside ESPHome / HomeWizard / HA entities
+- New `/api/influx/live-slots` endpoint: returns the latest value per configured
+  InfluxDB slot (bat_soc averaged, others summed)
+- `HomeFlow` resolves and polls InfluxDB live values every 10 s when influx
+  sources are selected
+
 ## [1.3.0] - 2026-04-02
 
 ### Fixed

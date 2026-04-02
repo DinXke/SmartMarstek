@@ -45,7 +45,7 @@ function flowDur(power) {
 }
 
 /** Resolve one source entry → numeric value or null */
-function resolveOne(sc, batteries, hwData, haData) {
+function resolveOne(sc, batteries, hwData, haData, influxLive) {
   if (sc.source === "esphome") {
     const bat = batteries.find((b) => b.id === sc.device_id);
     const v = bat?.[sc.sensor];
@@ -63,6 +63,11 @@ function resolveOne(sc, batteries, hwData, haData) {
     if (entry?.value == null) return null;
     return sc.invert ? -entry.value : entry.value;
   }
+  if (sc.source === "influx") {
+    const v = influxLive?.[sc.sensor];
+    if (v == null) return null;
+    return sc.invert ? -v : v;
+  }
   return null;
 }
 
@@ -70,7 +75,7 @@ function resolveOne(sc, batteries, hwData, haData) {
  * Resolve a flow slot: supports array of sources (summed) or single object (backward compat).
  * For bat_soc the values are averaged instead of summed.
  */
-function resolveSlot(key, cfg, batteries, hwData, haData) {
+function resolveSlot(key, cfg, batteries, hwData, haData, influxLive) {
   let slotCfg = cfg?.[key];
   if (!slotCfg) return null;
   if (!Array.isArray(slotCfg)) slotCfg = [slotCfg]; // backward compat
@@ -80,7 +85,7 @@ function resolveSlot(key, cfg, batteries, hwData, haData) {
   let count = 0;
 
   for (const sc of slotCfg) {
-    const v = resolveOne(sc, batteries, hwData, haData);
+    const v = resolveOne(sc, batteries, hwData, haData, influxLive);
     if (v != null) {
       total = (total ?? 0) + v;
       count++;
@@ -172,9 +177,10 @@ function FlowLabel({ x, y, text, color, small }) {
 // ---------------------------------------------------------------------------
 
 export default function HomeFlow({ batteries = [], phaseVoltages, acVoltage }) {
-  const [hwData,  setHwData]  = useState(null);
-  const [haData,  setHaData]  = useState({});  // {entity_id: {value, unit}}
-  const [cfg,     setCfg]     = useState(() => loadFlowCfg());
+  const [hwData,     setHwData]     = useState(null);
+  const [haData,     setHaData]     = useState({});  // {entity_id: {value, unit}}
+  const [influxLive, setInfluxLive] = useState({});
+  const [cfg,        setCfg]        = useState(() => loadFlowCfg());
 
   // Reload config when settings page saves it
   useEffect(() => {
@@ -192,6 +198,15 @@ export default function HomeFlow({ batteries = [], phaseVoltages, acVoltage }) {
       const r = await fetch("api/homewizard/data");
       if (r.ok) setHwData(await r.json());
     } catch { /* no HW configured */ }
+  }, []);
+
+  const pollInflux = useCallback(async (currentCfg) => {
+    const hasInflux = Object.values(currentCfg).flat().some((sc) => sc?.source === "influx");
+    if (!hasInflux) return;
+    try {
+      const r = await fetch("api/influx/live-slots");
+      if (r.ok) setInfluxLive(await r.json());
+    } catch { /* InfluxDB not configured */ }
   }, []);
 
   // Poll all HA entity_ids that are referenced in the current config
@@ -213,9 +228,10 @@ export default function HomeFlow({ batteries = [], phaseVoltages, acVoltage }) {
   useEffect(() => {
     pollHw();
     pollHa(cfg);
-    const id = setInterval(() => { pollHw(); pollHa(cfg); }, 10000);
+    pollInflux(cfg);
+    const id = setInterval(() => { pollHw(); pollHa(cfg); pollInflux(cfg); }, 10000);
     return () => clearInterval(id);
-  }, [pollHw, pollHa, cfg]);
+  }, [pollHw, pollHa, pollInflux, cfg]);
 
   // ── Aggregate ESPHome defaults ─────────────────────────────────────────────
   let totalAc = null, totalBat = null;
@@ -231,20 +247,20 @@ export default function HomeFlow({ batteries = [], phaseVoltages, acVoltage }) {
     : null;
 
   // ── Resolve configured slots ───────────────────────────────────────────────
-  const solarPower  = resolveSlot("solar_power", cfg, batteries, hwData, haData);
+  const solarPower  = resolveSlot("solar_power", cfg, batteries, hwData, haData, influxLive);
 
   // net_power: positive = import from grid
-  const netPowerRaw = resolveSlot("net_power",   cfg, batteries, hwData, haData);
+  const netPowerRaw = resolveSlot("net_power",   cfg, batteries, hwData, haData, influxLive);
 
   // bat_power: positive = discharging
-  const batPowerRaw = resolveSlot("bat_power",   cfg, batteries, hwData, haData);
+  const batPowerRaw = resolveSlot("bat_power",   cfg, batteries, hwData, haData, influxLive);
 
-  const batSoc = resolveSlot("bat_soc", cfg, batteries, hwData, haData) ?? avgSoc;
+  const batSoc = resolveSlot("bat_soc", cfg, batteries, hwData, haData, influxLive) ?? avgSoc;
 
   // Phase voltages overrides
-  const v1 = resolveSlot("voltage_l1", cfg, batteries, hwData, haData);
-  const v2 = resolveSlot("voltage_l2", cfg, batteries, hwData, haData);
-  const v3 = resolveSlot("voltage_l3", cfg, batteries, hwData, haData);
+  const v1 = resolveSlot("voltage_l1", cfg, batteries, hwData, haData, influxLive);
+  const v2 = resolveSlot("voltage_l2", cfg, batteries, hwData, haData, influxLive);
+  const v3 = resolveSlot("voltage_l3", cfg, batteries, hwData, haData, influxLive);
 
   // ── Unified sign convention ────────────────────────────────────────────────
   // netDisplayPower: positive = export to grid (drives arrow direction logic)

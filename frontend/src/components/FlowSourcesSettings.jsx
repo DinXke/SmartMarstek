@@ -178,16 +178,27 @@ function MultiSelect({ options, selected, onChange, unit, currentValues }) {
   );
 }
 
+// InfluxDB slot definitions (unit must match SLOT_DEFS units for filtering)
+const INFLUX_SLOT_META = {
+  solar_w: { label: "☀️ Zonnepanelen",        unit: "W" },
+  net_w:   { label: "⚡ Net (import/export)", unit: "W" },
+  house_w: { label: "🏠 Thuisverbruik",       unit: "W" },
+  bat_w:   { label: "🔌 Batterij vermogen",   unit: "W" },
+  bat_soc: { label: "🔋 Batterij SOC",        unit: "%" },
+};
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export default function FlowSourcesSettings({ devices = [], powerMap = {} }) {
-  const [config,     setConfig]     = useState(() => loadFlowCfg());
-  const [hwData,     setHwData]     = useState(null);
-  const [haEntities, setHaEntities] = useState([]);
-  const [saved,      setSaved]      = useState(false);
-  const [error,      setError]      = useState(null);
+  const [config,      setConfig]      = useState(() => loadFlowCfg());
+  const [hwData,      setHwData]      = useState(null);
+  const [haEntities,  setHaEntities]  = useState([]);
+  const [influxSrc,   setInfluxSrc]   = useState(null);
+  const [influxLive,  setInfluxLive]  = useState({});
+  const [saved,       setSaved]       = useState(false);
+  const [error,       setError]       = useState(null);
 
   const loadHw = useCallback(async () => {
     try { const r = await fetch("api/homewizard/data"); if (r.ok) setHwData(await r.json()); } catch {}
@@ -200,7 +211,18 @@ export default function FlowSourcesSettings({ devices = [], powerMap = {} }) {
     } catch {}
   }, []);
 
-  useEffect(() => { loadHw(); loadHa(); }, [loadHw, loadHa]);
+  const loadInflux = useCallback(async () => {
+    try {
+      const [srcR, liveR] = await Promise.all([
+        fetch("api/influx/source"),
+        fetch("api/influx/live-slots"),
+      ]);
+      if (srcR.ok)  setInfluxSrc(await srcR.json());
+      if (liveR.ok) setInfluxLive(await liveR.json());
+    } catch {}
+  }, []);
+
+  useEffect(() => { loadHw(); loadHa(); loadInflux(); }, [loadHw, loadHa, loadInflux]);
 
   // ── Build options ─────────────────────────────────────────────────────────
   const esphomeOptions = [];
@@ -224,6 +246,22 @@ export default function FlowSourcesSettings({ devices = [], powerMap = {} }) {
         source: "homewizard", deviceId: dev.id, sensor: key,
         label: `${dev.name} — ${meta.label}`,
         unit: meta.unit ?? "", current: meta.value ?? null, hint: "",
+      });
+    }
+  }
+
+  const influxOptions = [];
+  if (influxSrc?.mappings) {
+    for (const [slotKey, meta] of Object.entries(INFLUX_SLOT_META)) {
+      const mapping = influxSrc.mappings[slotKey];
+      if (!mapping) continue;
+      const entries = Array.isArray(mapping) ? mapping : [mapping];
+      if (!entries.some((e) => e.field)) continue;
+      influxOptions.push({
+        key: `influx::influx::${slotKey}`,
+        source: "influx", deviceId: "influx", sensor: slotKey,
+        label: meta.label, unit: meta.unit,
+        current: influxLive[slotKey] ?? null, hint: "",
       });
     }
   }
@@ -284,7 +322,7 @@ export default function FlowSourcesSettings({ devices = [], powerMap = {} }) {
     <div className="settings-section">
       <div className="settings-section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span>⚡ Vermogensstroom bronnen</span>
-        <button className="btn btn-ghost btn-sm" onClick={() => { loadHw(); loadHa(); }}>Vernieuwen</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => { loadHw(); loadHa(); loadInflux(); }}>Vernieuwen</button>
       </div>
       <div style={{ padding: "4px 20px 12px", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
         Wijs per positie één of meer sensoren toe. Meerdere bronnen worden opgeteld.
@@ -306,13 +344,20 @@ export default function FlowSourcesSettings({ devices = [], powerMap = {} }) {
             cur = dev?.sensors?.[sc.sensor]?.value ?? null;
           } else if (sc.source === "homeassistant") {
             cur = haCurrentValues[sc.sensor] ?? null;
+          } else if (sc.source === "influx") {
+            cur = influxLive[sc.sensor] ?? null;
           }
           if (cur != null) liveTotal = (liveTotal ?? 0) + (sc.invert ? -cur : cur);
         }
 
-        const compatible  = { esphome: esphomeOptions.filter((o) => o.unit === slotDef.unit), hw: hwOptions.filter((o) => o.unit === slotDef.unit), ha: haOptions.filter((o) => o.unit === slotDef.unit) };
+        const compatible  = {
+          esphome: esphomeOptions.filter((o) => o.unit === slotDef.unit),
+          hw:      hwOptions.filter((o) => o.unit === slotDef.unit),
+          ha:      haOptions.filter((o) => o.unit === slotDef.unit),
+          influx:  influxOptions.filter((o) => o.unit === slotDef.unit),
+        };
         const haSelected  = arr.filter((sc) => sc.source === "homeassistant");
-        const hasAnything = compatible.esphome.length + compatible.hw.length + compatible.ha.length > 0;
+        const hasAnything = compatible.esphome.length + compatible.hw.length + compatible.ha.length + compatible.influx.length > 0;
 
         return (
           <div key={slotKey} className="settings-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: 8 }}>
@@ -367,6 +412,36 @@ export default function FlowSourcesSettings({ devices = [], powerMap = {} }) {
                   <div className="flow-source-group">
                     <div className="flow-opt-group-label">🏠 HomeWizard</div>
                     {compatible.hw.map((opt) => {
+                      const checked = isSelected(arr, opt);
+                      const inv     = getInvert(arr, opt);
+                      return (
+                        <div key={opt.key} className={`flow-opt-row${checked ? " flow-opt-row--checked" : ""}`}>
+                          <label className="flow-opt-check">
+                            <input type="checkbox" checked={checked}
+                              onChange={(e) => toggleOption(slotKey, opt, e.target.checked)} />
+                            <span className="flow-opt-label">{opt.label}</span>
+                            {opt.current != null && <span className="flow-opt-val">{fmtVal(opt.current, opt.unit)}</span>}
+                          </label>
+                          {checked && (
+                            <div className="flow-opt-extras">
+                              <label className="flow-opt-invert">
+                                <input type="checkbox" checked={inv}
+                                  onChange={(e) => toggleInvert(slotKey, opt, e.target.checked)} />
+                                Omkeren
+                              </label>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* InfluxDB checkboxes */}
+                {compatible.influx.length > 0 && (
+                  <div className="flow-source-group">
+                    <div className="flow-opt-group-label">📊 InfluxDB</div>
+                    {compatible.influx.map((opt) => {
                       const checked = isSelected(arr, opt);
                       const inv     = getInvert(arr, opt);
                       return (

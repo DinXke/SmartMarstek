@@ -2225,6 +2225,22 @@ def _query_external_influx_slot_latest(slot_key: str) -> list[float]:
     return results
 
 
+@app.route("/api/influx/live-slots")
+def get_influx_live_slots():
+    """Return the latest value for each configured InfluxDB slot (for live power-flow display)."""
+    # bat_soc → average of all batteries; everything else → sum
+    AVG_SLOTS = {"bat_soc"}
+    result = {}
+    for slot in ("house_w", "solar_w", "net_w", "bat_soc", "bat_w"):
+        try:
+            vals = _query_external_influx_slot_latest(slot)
+            if vals:
+                result[slot] = sum(vals) / len(vals) if slot in AVG_SLOTS else sum(vals)
+        except Exception as exc:
+            log.debug("live-slots [%s]: %s", slot, exc)
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # Serve React frontend (production build)
 # ---------------------------------------------------------------------------
