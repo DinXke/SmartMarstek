@@ -39,9 +39,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version (strip leading v)
-        id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+      - name: Extract version and lowercase owner
+        id: meta
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -50,8 +52,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: BUILD_FROM=${{ matrix.base }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/smartmarstek/${{ matrix.arch }}:${{ steps.ver.outputs.version }}
-            ghcr.io/${{ github.repository_owner }}/smartmarstek/${{ matrix.arch }}:latest
+            ghcr.io/${{ steps.meta.outputs.owner }}/smartmarstek/${{ matrix.arch }}:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/smartmarstek/${{ matrix.arch }}:latest
           push: true
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
