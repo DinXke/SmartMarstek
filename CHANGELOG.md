@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.10.0] - 2026-04-02
+
+### Fixed
+- Werkelijke zonneopbrengst InfluxDB: tijdstempels werden altijd als UTC
+  behandeld; bars verschenen ~2 uur te vroeg. Tijdstempels worden nu expliciet
+  van UTC naar lokale tijd omgezet (geen afhankelijkheid van tz()-ondersteuning
+  in InfluxDB v1).
+- Werkelijke zonneopbrengst HA history: zelfde UTC→lokale-tijd-conversie
+  toegepast zodat slots op het juiste uur staan.
+- setup_config.py: HA URL werd bij elke herstart overschreven met
+  `http://homeassistant:8123` zelfs als de gebruiker een eigen URL had
+  ingesteld. Nu wordt de bestaande URL bewaard tenzij het een localhost-variant
+  is.
+
 ## [1.9.0] - 2026-04-02
 
 ### Fixed

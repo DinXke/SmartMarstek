@@ -58,13 +58,26 @@ def main():
             {"url": ha_url, "token": ha_token},
         )
     elif supervisor_token:
-        # Running as HA add-on: always use Supervisor URL (overrides any
-        # previously stored wrong URL such as localhost:8123)
-        write_if_changed(
-            os.path.join(DATA_DIR, "ha_settings.json"),
-            {"url": "http://homeassistant:8123", "token": supervisor_token},
-        )
-        print("[setup_config] HA: auto-configured via Supervisor token", flush=True)
+        # Running as HA add-on: auto-configure only if no existing user-set URL.
+        # Never overwrite a URL that was explicitly set by the user via the web UI.
+        _ha_file = os.path.join(DATA_DIR, "ha_settings.json")
+        _existing_url = ""
+        try:
+            with open(_ha_file, encoding="utf-8") as _f:
+                _existing_url = json.load(_f).get("url", "")
+        except Exception:
+            pass
+        _is_default = (not _existing_url
+                       or "localhost" in _existing_url
+                       or "127.0.0.1" in _existing_url)
+        if _is_default:
+            write_if_changed(
+                _ha_file,
+                {"url": "http://homeassistant:8123", "token": supervisor_token},
+            )
+            print("[setup_config] HA: auto-configured via Supervisor token", flush=True)
+        else:
+            print(f"[setup_config] HA: keeping user URL {_existing_url!r}", flush=True)
     elif ha_url or ha_token:
         print("[setup_config] HA: both ha_url and ha_token are required – skipping", flush=True)
 

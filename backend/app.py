@@ -1447,7 +1447,7 @@ def get_forecast_actuals():
         try:
             if version == "v1":
                 # Extend UTC range by ±14h to cover any timezone, then filter
-                # results to the target local date after query
+                # results to the target local date after converting to local time
                 from datetime import datetime as _dt2, timedelta as _td2
                 _d = _dt2.strptime(date_str, "%Y-%m-%d")
                 _start = (_d - _td2(hours=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1455,19 +1455,26 @@ def get_forecast_actuals():
                 where_parts = [f"time >= '{_start}' AND time < '{_end}'"]
                 if tag_key and tag_val:
                     where_parts.append(f'"{tag_key}" = \'{tag_val}\'')
+                # No tz() in query – InfluxDB v1 tz() support varies; always
+                # receive UTC and convert to local time ourselves.
                 q = (f'SELECT mean("{field}") AS val FROM "{meas}"'
                      f' WHERE {" AND ".join(where_parts)}'
-                     f" GROUP BY time(15m) fill(null) tz('{tz_name}')")
+                     f" GROUP BY time(15m) fill(null)")
                 data = _influx_v1_query(url, username, password, q, db=database)
+                _tz_obj = _pytz.timezone(tz_name)
                 for res in data.get("results", []):
                     for series in res.get("series", []):
                         for row in series.get("values", []):
                             ts_raw, val = row[0], row[1]
                             if val is None:
                                 continue
-                            # normalise timestamp → "YYYY-MM-DD HH:MM:00"
-                            ts = ts_raw[:19].replace("T", " ")
-                            # only keep slots that belong to the requested date
+                            # Convert UTC → local time
+                            try:
+                                dt_utc = _dt2.strptime(ts_raw[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                                    tzinfo=_pytz.utc)
+                                ts = dt_utc.astimezone(_tz_obj).strftime("%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                ts = ts_raw[:19].replace("T", " ")
                             if ts.startswith(date_str):
                                 result[ts] = float(val)
         except Exception as exc:
@@ -1493,18 +1500,30 @@ def get_forecast_actuals():
             if not history or not history[0]:
                 return jsonify({"watts": {}})
             states = history[0]
-            # Bin into 15-min slots
+            # Bin into 15-min slots (HA returns UTC timestamps → convert to local)
+            from datetime import datetime as _dt_ha
+            _tz_ha = _pytz.timezone(tz_name)
             buckets: dict[str, list[float]] = {}
             for state in states:
                 try:
                     val = float(state["state"])
                 except (ValueError, TypeError, KeyError):
                     continue
-                ts_raw = state.get("last_changed", "")[:19].replace("T", " ")
-                if not ts_raw.startswith(date_str):
-                    continue
-                # round down to 15-min boundary
-                h, m = int(ts_raw[11:13]), int(ts_raw[14:16])
+                ts_raw = state.get("last_changed", "")
+                try:
+                    dt_utc = _dt_ha.strptime(ts_raw[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                        tzinfo=_pytz.utc)
+                    dt_local = dt_utc.astimezone(_tz_ha)
+                    local_date = dt_local.strftime("%Y-%m-%d")
+                    if local_date != date_str:
+                        continue
+                    h, m = dt_local.hour, dt_local.minute
+                except Exception:
+                    local_str = ts_raw[:19].replace("T", " ")
+                    if not local_str.startswith(date_str):
+                        continue
+                    h, m = int(local_str[11:13]), int(local_str[14:16])
+                    local_date = date_str
                 slot_m = (m // 15) * 15
                 slot = f"{date_str} {h:02d}:{slot_m:02d}:00"
                 buckets.setdefault(slot, []).append(val)
