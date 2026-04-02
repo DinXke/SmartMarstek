@@ -427,7 +427,7 @@ const ACTION_LABEL = {
   neutral:      "· Neutraal",
 };
 
-function AutomationToggle() {
+function AutomationToggle({ planLoadedAt }) {
   const [auto,    setAuto]    = useState(null);
   const [saving,  setSaving]  = useState(false);
 
@@ -443,6 +443,11 @@ function AutomationToggle() {
     const id = setInterval(load, 30_000);
     return () => clearInterval(id);
   }, []);
+
+  // Re-fetch immediately when the plan finishes loading (fills the plan cache)
+  useEffect(() => {
+    if (planLoadedAt) load();
+  }, [planLoadedAt]);
 
   const toggle = async () => {
     if (!auto) return;
@@ -520,11 +525,12 @@ function AutomationToggle() {
 }
 
 export default function StrategyPage() {
-  const [plan,      setPlan]      = useState(null);
-  const [loading,   setLoading]   = useState(true);
-  const [error,     setError]     = useState(null);
-  const [lastFetch, setLastFetch] = useState(null);
-  const [viewDate,  setViewDate]  = useState(null); // null = today+tomorrow, string = specific date
+  const [plan,          setPlan]          = useState(null);
+  const [loading,       setLoading]       = useState(true);
+  const [error,         setError]         = useState(null);
+  const [lastFetch,     setLastFetch]     = useState(null);
+  const [viewDate,      setViewDate]      = useState(null); // null = today+tomorrow, string = specific date
+  const [planLoadedAt,  setPlanLoadedAt]  = useState(null);
 
   const load = useCallback(async (date) => {
     setLoading(true); setError(null);
@@ -538,6 +544,7 @@ export default function StrategyPage() {
       }
       setPlan(await r.json());
       setLastFetch(new Date());
+      setPlanLoadedAt(Date.now());
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   }, []);
@@ -578,8 +585,8 @@ export default function StrategyPage() {
                   : <span style={{ color: "var(--text-muted)" }}>⚠ Geen prijzen (ENTSO-E configureren)</span>}
                 {" · "}
                 {plan.solar_available
-                  ? <span style={{ color: "#fbbf24" }}>✓ Zoneprognose</span>
-                  : <span style={{ color: "var(--text-muted)" }}>⚠ Geen zoneprognose (Forecast.Solar)</span>}
+                  ? <span style={{ color: "#fbbf24" }}>✓ Zonneprognose</span>
+                  : <span style={{ color: "var(--text-muted)" }}>⚠ Geen zonneprognose (Forecast.Solar)</span>}
                 {" · "}
                 <span style={{ color: "var(--text-muted)" }}>
                   SOC: {Math.round(plan.soc_now || 0)}%
@@ -628,7 +635,7 @@ export default function StrategyPage() {
       </div>
 
       {/* Automation toggle – only shown in forward (today) view */}
-      {!viewDate && <AutomationToggle />}
+      {!viewDate && <AutomationToggle planLoadedAt={planLoadedAt} />}
 
       {loading && !plan && (
         <div className="loading-overlay" style={{ position: "relative", height: 100 }}>

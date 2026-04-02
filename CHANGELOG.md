@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0] - 2026-04-02
+
+### Fixed
+- Typo "Zoneprognose" → "Zonneprognose" in de strategie statusindicator
+- "Huidig uur: —" in automatisatiebalk: automation-component refresht nu
+  direct nadat het laadplan geladen is (i.p.v. wachten op 30-sec poll)
+
 ## [1.10.0] - 2026-04-02
 
 ### Fixed
