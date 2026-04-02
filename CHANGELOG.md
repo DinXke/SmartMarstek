@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.17.0] - 2026-04-02
+
+### Fixed
+- "Huidig uur: —" definitief opgelost: `_plan_cache["slots"]` gebruikte
+  `result.get("slots", [])` maar `split_days()` geeft `"all"` terug, niet
+  `"slots"` — waardoor de cache altijd leeg was
+
 ## [1.16.0] - 2026-04-02
 
 ### Fixed

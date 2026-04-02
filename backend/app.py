@@ -2667,7 +2667,7 @@ def _compute_forward_plan() -> dict:
     result["is_historical"]       = False
     result["consumption_source"]  = consumption_source
 
-    _plan_cache["slots"]      = result.get("slots", [])
+    _plan_cache["slots"]      = result.get("all", [])
     _plan_cache["fetched_at"] = datetime.now(timezone.utc).isoformat()
     return result
 
