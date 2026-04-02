@@ -1446,7 +1446,13 @@ def get_forecast_actuals():
             return jsonify({"error": "InfluxDB niet volledig geconfigureerd."}), 400
         try:
             if version == "v1":
-                where_parts = [f"time >= '{date_str}T00:00:00Z' AND time < '{date_str}T23:59:59Z'"]
+                # Extend UTC range by ±14h to cover any timezone, then filter
+                # results to the target local date after query
+                from datetime import datetime as _dt2, timedelta as _td2
+                _d = _dt2.strptime(date_str, "%Y-%m-%d")
+                _start = (_d - _td2(hours=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                _end   = (_d + _td2(hours=38)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                where_parts = [f"time >= '{_start}' AND time < '{_end}'"]
                 if tag_key and tag_val:
                     where_parts.append(f'"{tag_key}" = \'{tag_val}\'')
                 q = (f'SELECT mean("{field}") AS val FROM "{meas}"'
@@ -1461,7 +1467,9 @@ def get_forecast_actuals():
                                 continue
                             # normalise timestamp → "YYYY-MM-DD HH:MM:00"
                             ts = ts_raw[:19].replace("T", " ")
-                            result[ts] = float(val)
+                            # only keep slots that belong to the requested date
+                            if ts.startswith(date_str):
+                                result[ts] = float(val)
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
 

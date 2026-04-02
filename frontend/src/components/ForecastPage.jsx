@@ -1,6 +1,7 @@
 /**
  * ForecastPage – Zonneopbrengst voorspelling via forecast.solar
  * Toont vandaag en morgen als staafdiagram (15-minuten intervallen).
+ * Navigeer terug voor historische werkelijke opbrengst.
  */
 import { useState, useEffect, useCallback } from "react";
 
@@ -186,14 +187,71 @@ function DayPanel({ title, date, watts, whPeriod, whDay, isToday, actualWatts })
   );
 }
 
+// ── Historical day panel (actuals only, no forecast) ─────────────────────────
+
+function ActualDayPanel({ date, watts }) {
+  const slots = Object.entries(watts)
+    .filter(([k]) => k.startsWith(date))
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  const totalWh  = slots.reduce((s, [, v]) => s + v * 0.25, 0);
+  const peak     = slots.length ? slots.reduce((m, [, v]) => Math.max(m, v), 0) : null;
+  const peakTs   = peak != null ? slots.find(([, v]) => v === peak)?.[0] : null;
+
+  return (
+    <div className="forecast-day-panel">
+      <div className="forecast-day-header">
+        <span className="forecast-day-title">{date}</span>
+        <div className="forecast-day-stats">
+          <span className="forecast-stat">
+            <span className="forecast-stat-label">Werkelijk totaal</span>
+            <span className="forecast-stat-value" style={{ color: "#38bdf8" }}>{fmtKwh(totalWh)}</span>
+          </span>
+          {peak != null && (
+            <span className="forecast-stat">
+              <span className="forecast-stat-label">Piek</span>
+              <span className="forecast-stat-value" style={{ color: "#38bdf8" }}>
+                {fmtW(peak)}
+                {peakTs && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> om {fmtHour(peakTs)}</span>}
+              </span>
+            </span>
+          )}
+        </div>
+      </div>
+      {slots.length === 0 ? (
+        <div style={{ color: "var(--text-muted)", fontSize: 13, padding: "24px 0", textAlign: "center" }}>
+          Geen werkelijke data beschikbaar voor deze dag.
+        </div>
+      ) : (
+        <>
+          <div className="forecast-chart-label">Werkelijk vermogen (W)</div>
+          <BarChart slots={slots} color="56,189,248" unit="W" />
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
+function addDays(dateStr, n) {
+  const d = new Date(dateStr); d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
 export default function ForecastPage() {
-  const [data,       setData]       = useState(null);
-  const [loading,    setLoading]    = useState(true);
-  const [error,      setError]      = useState(null);
-  const [lastFetch,  setLastFetch]  = useState(null);
+  const [data,        setData]        = useState(null);
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState(null);
+  const [lastFetch,   setLastFetch]   = useState(null);
   const [actualWatts, setActualWatts] = useState(null);
+  // Navigation: null = forecast view (today+tomorrow), date string = historical
+  const [histDate,    setHistDate]    = useState(null);
+  const [histWatts,   setHistWatts]   = useState(null);
+  const [histLoading, setHistLoading] = useState(false);
+
+  const todayStr    = today();
+  const tomorrowStr = tomorrow();
 
   const loadActuals = useCallback(async (date) => {
     try {
@@ -203,6 +261,15 @@ export default function ForecastPage() {
         if (d.watts && Object.keys(d.watts).length > 0) setActualWatts(d.watts);
       }
     } catch { /* actuals optional */ }
+  }, []);
+
+  const loadHistActuals = useCallback(async (date) => {
+    setHistLoading(true); setHistWatts(null);
+    try {
+      const r = await fetch(`api/forecast/actuals?date=${date}`);
+      if (r.ok) { const d = await r.json(); setHistWatts(d.watts ?? {}); }
+    } catch { setHistWatts({}); }
+    finally { setHistLoading(false); }
   }, []);
 
   const load = useCallback(async () => {
@@ -215,31 +282,64 @@ export default function ForecastPage() {
       }
       setData(await r.json());
       setLastFetch(new Date());
-      loadActuals(today());
+      loadActuals(todayStr);
     } catch (e) { setError(e.message); }
     finally     { setLoading(false); }
-  }, [loadActuals]);
+  }, [loadActuals, todayStr]);
 
   useEffect(() => { load(); }, [load]);
 
-  const todayStr    = today();
-  const tomorrowStr = tomorrow();
+  const goBack = () => {
+    const base = histDate ?? todayStr;
+    const prev = addDays(base, -1);
+    setHistDate(prev);
+    loadHistActuals(prev);
+  };
+
+  const goForward = () => {
+    if (!histDate) return;
+    const next = addDays(histDate, 1);
+    if (next >= todayStr) {
+      setHistDate(null);
+      setHistWatts(null);
+    } else {
+      setHistDate(next);
+      loadHistActuals(next);
+    }
+  };
 
   return (
     <div className="forecast-page">
       <div className="forecast-header">
         <div>
           <div className="forecast-title">☀️ Zonneopbrengst voorspelling</div>
-          {lastFetch && (
+          {lastFetch && !histDate && (
             <div className="forecast-subtitle">
               Bijgewerkt: {lastFetch.toLocaleTimeString("nl-BE")}
               <span style={{ color: "var(--text-dim)", marginLeft: 8 }}>· cache 15 min</span>
             </div>
           )}
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={load} disabled={loading}>
-          {loading ? "Laden…" : "↺ Vernieuwen"}
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button className="btn btn-ghost btn-sm" onClick={goBack} title="Vorige dag">◀</button>
+          {histDate ? (
+            <button className="btn btn-ghost btn-sm" onClick={() => { setHistDate(null); setHistWatts(null); }}
+              style={{ minWidth: 90 }}>
+              {histDate}
+            </button>
+          ) : (
+            <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 90, textAlign: "center" }}>
+              Vandaag
+            </span>
+          )}
+          <button className="btn btn-ghost btn-sm" onClick={goForward}
+            disabled={!histDate} title="Volgende dag">▶</button>
+          {!histDate && (
+            <button className="btn btn-ghost btn-sm" onClick={load} disabled={loading}>
+              {loading ? "Laden…" : "↺"}
+            </button>
+          )}
+        </div>
       </div>
 
       {loading && !data && (
@@ -261,14 +361,26 @@ export default function ForecastPage() {
         </div>
       )}
 
-      {data && !error && (
+      {/* Historical view */}
+      {histDate && (
+        histLoading ? (
+          <div className="loading-overlay" style={{ position: "relative", height: 80 }}>
+            <div className="loading-spinner" />
+            <span>Ophalen…</span>
+          </div>
+        ) : (
+          <ActualDayPanel date={histDate} watts={histWatts ?? {}} />
+        )
+      )}
+
+      {/* Forecast view (today + tomorrow) */}
+      {!histDate && data && !error && (
         <>
           {data.errors?.length > 0 && (
             <div className="forecast-error" style={{ marginBottom: 16 }}>
               {data.errors.map((e, i) => <div key={i}>⚠ {e}</div>)}
             </div>
           )}
-
           <DayPanel
             title="Vandaag"
             date={todayStr}

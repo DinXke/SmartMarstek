@@ -383,9 +383,9 @@ export default function PricesPage() {
       if (src === "entsoe") {
         // Pass country from Frank session if available, else default BE
         const country = status?.country || "BE";
-        url = `/api/prices/entsoe?country=${country}`;
+        url = `api/prices/entsoe?country=${country}`;
       } else {
-        url = "/api/prices/electricity";
+        url = "api/prices/electricity";
       }
       const r = await fetch(url);
       if (!r.ok) {
