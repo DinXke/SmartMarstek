@@ -31,7 +31,8 @@ log = logging.getLogger("strategy")
 # Settings file
 # ---------------------------------------------------------------------------
 
-STRATEGY_SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "strategy_settings.json")
+_DATA_DIR = os.environ.get("MARSTEK_DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+STRATEGY_SETTINGS_FILE = os.path.join(_DATA_DIR, "strategy_settings.json")
 
 DEFAULT_SETTINGS = {
     "bat_capacity_kwh":     10.0,   # total usable battery capacity
