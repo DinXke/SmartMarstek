@@ -19,7 +19,7 @@ retrieved with get_last_debug().
 import json
 import logging
 import time as _time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -518,6 +518,7 @@ def build_plan_claude(
     _set_debug(
         fallback=False,
         model=model,
+        ran_at=datetime.now(timezone.utc).isoformat(),
         elapsed_s=elapsed,
         input_tokens=getattr(response.usage, "input_tokens", None),
         output_tokens=getattr(response.usage, "output_tokens", None),

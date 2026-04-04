@@ -442,6 +442,14 @@ function ClaudeDebugPanel({ debug, plan }) {
         {!debug.fallback && (
           <>
             <span style={{ color: "var(--text-muted)" }}>Model: <strong style={{ color: "var(--text)" }}>{modelShort}</strong></span>
+            {debug.ran_at && (
+              <span style={{ color: "var(--text-muted)" }}>
+                Laatste berekening:{" "}
+                <strong style={{ color: "var(--text)" }}>
+                  {new Date(debug.ran_at).toLocaleString("nl-BE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                </strong>
+              </span>
+            )}
             <span style={{ color: "var(--text-muted)" }}>
               Tokens: <strong style={{ color: "var(--text)" }}>{debug.input_tokens ?? "?"} in / {debug.output_tokens ?? "?"} out</strong>
             </span>

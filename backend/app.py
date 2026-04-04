@@ -2799,11 +2799,54 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
     _plan_cache["fetched_at"]        = datetime.now(timezone.utc).isoformat()
     _plan_cache["result"]            = result
     _plan_cache["price_fingerprint"] = _price_fp
+    _persist_plan_cache()
     return result
 
 
 # Cache the last computed strategy plan (set by _compute_forward_plan)
 _plan_cache: dict = {"slots": [], "fetched_at": None, "result": None}
+
+# Persist plan cache to disk so Claude is not re-called after addon restarts.
+_PLAN_CACHE_FILE = os.path.join(DATA_DIR, "strategy_plan_cache.json")
+
+
+def _persist_plan_cache() -> None:
+    """Save _plan_cache to disk (called after every successful plan build)."""
+    try:
+        with open(_PLAN_CACHE_FILE, "w", encoding="utf-8") as _f:
+            json.dump({
+                "fetched_at":        _plan_cache.get("fetched_at"),
+                "price_fingerprint": _plan_cache.get("price_fingerprint"),
+                "result":            _plan_cache.get("result"),
+                # slots list can be large; derive from result["all"] on restore
+            }, _f)
+    except Exception as _e:
+        log.warning("_persist_plan_cache: write failed: %s", _e)
+
+
+def _restore_plan_cache() -> None:
+    """Load _plan_cache from disk on startup (only if ≤ 26 h old)."""
+    try:
+        with open(_PLAN_CACHE_FILE, "r", encoding="utf-8") as _f:
+            data = json.load(_f)
+        fetched_at = data.get("fetched_at")
+        if not fetched_at:
+            return
+        age_h = (datetime.now(timezone.utc)
+                 - datetime.fromisoformat(fetched_at)).total_seconds() / 3600
+        if age_h > 26:
+            log.info("_restore_plan_cache: cache too old (%.1fh) – discarded", age_h)
+            return
+        _plan_cache["fetched_at"]        = fetched_at
+        _plan_cache["price_fingerprint"] = data.get("price_fingerprint")
+        _plan_cache["result"]            = data.get("result")
+        _plan_cache["slots"]             = (data.get("result") or {}).get("all", [])
+        log.info("_restore_plan_cache: restored (age=%.1fh, fp=%s)",
+                 age_h, data.get("price_fingerprint"))
+    except FileNotFoundError:
+        pass
+    except Exception as _e:
+        log.warning("_restore_plan_cache: read failed: %s", _e)
 
 # Consumption profile cache — valid for 30 minutes (profile changes slowly)
 _consumption_cache: dict = {"data": [], "source": "", "fetched_at": None, "key": ""}
@@ -2959,6 +3002,8 @@ def set_automation():
 
 
 if __name__ == "__main__":
+    # Restore persisted plan cache so Claude is not re-called after restarts
+    _restore_plan_cache()
     # Start InfluxDB background writer
     start_background_writer(_influx_context, interval=30)
     # Start automation background thread
