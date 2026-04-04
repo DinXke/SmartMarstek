@@ -1431,6 +1431,8 @@ def get_forecast_actuals():
     cfg  = _forecast_actual_source()
     src  = cfg.get("source", "none")
     result: dict[str, float] = {}
+    tz_name  = (_forecast_settings().get("timezone") or
+                _entsoe_settings().get("timezone") or "Europe/Brussels")
 
     if src == "influx":
         influx_src  = _load_influx_source()
@@ -1451,8 +1453,6 @@ def get_forecast_actuals():
         meas     = mapping.get("measurement") or influx_src.get("measurement", "")
         tag_key  = mapping.get("tag_key", "")
         tag_val  = mapping.get("tag_value", "")
-        tz_name  = (_forecast_settings().get("timezone") or
-                    _entsoe_settings().get("timezone") or "Europe/Brussels")
         if not url or not meas:
             return jsonify({"error": "InfluxDB niet volledig geconfigureerd."}), 400
         try:
@@ -1551,7 +1551,6 @@ def get_forecast_actuals():
         # InfluxDB (written by the background writer) when available, else HA history
         # using the sensor name derived from the ESPHome entity.
         ha_s     = _ha_effective_settings()
-        tz_name  = _entsoe_settings().get("timezone", "Europe/Brussels")
         import pytz as _pytz2
         _tz2     = _pytz2.timezone(tz_name)
 
