@@ -721,8 +721,10 @@ function AutomationToggle({ planLoadedAt }) {
 
   if (!auto) return null;
 
-  const enabled = auto.enabled;
-  const action  = auto.current_action;
+  const enabled        = auto.enabled;
+  const action         = auto.current_action;
+  const lastAction     = auto.last_action;
+  const overrideReason = auto.override_reason;
 
   return (
     <div className="automation-bar" style={{
@@ -759,16 +761,25 @@ function AutomationToggle({ planLoadedAt }) {
             {" · "}
             Batterijmodus:{" "}
             <strong>
-              {action === "solar_charge" && "anti-feed"}
-              {action === "grid_charge"  && "manual + geforceerd laden"}
-              {action === "save"         && "manual + laden uit"}
-              {action === "discharge"    && "anti-feed"}
-              {action === "neutral"      && "anti-feed"}
-              {!action                   && "—"}
+              {lastAction === "solar_charge" && "anti-feed"}
+              {lastAction === "grid_charge"  && "manual + geforceerd laden"}
+              {lastAction === "save"         && "manual + laden uit"}
+              {lastAction === "discharge"    && "anti-feed"}
+              {lastAction === "neutral"      && "anti-feed"}
+              {!lastAction                   && "—"}
             </strong>
             {auto.last_applied && (
               <>{" · "}Laatste update: {new Date(auto.last_applied).toLocaleTimeString("nl-BE")}</>
             )}
+          </div>
+        )}
+        {enabled && overrideReason && (
+          <div style={{
+            fontSize: 12, marginTop: 4, padding: "3px 8px", borderRadius: 5,
+            background: "rgba(251,191,36,0.15)", border: "1px solid rgba(251,191,36,0.4)",
+            color: "#fbbf24",
+          }}>
+            ⚡ Override: {overrideReason}
           </div>
         )}
         {!enabled && (

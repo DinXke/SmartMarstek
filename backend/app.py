@@ -3120,6 +3120,45 @@ _AUTOMATION_MODES: dict[str, list] = {
 }
 
 
+def _read_live_net_w() -> float | None:
+    """Return current net grid power (W) from flow_cfg sources.
+    Negative = exporting to grid (overproduction), positive = importing.
+    Returns None when no net_power source is configured or readable."""
+    try:
+        from influx_writer import _poll_esphome, _resolve_slot
+        devices_dict = load_devices()
+        live_cfg: dict = {}
+        try:
+            with open(FLOW_CFG_SERVER_FILE, "r", encoding="utf-8") as _f:
+                raw = json.load(_f)
+            for k, v in raw.items():
+                live_cfg[k] = v if isinstance(v, list) else [v]
+        except Exception:
+            return None
+        if not live_cfg.get("net_power"):
+            return None
+        esphome_map = _poll_esphome(devices_dict)
+        # Fetch live HA states for any HA net_power sensors
+        ha_net_data: dict = {}
+        ha_s = _ha_effective_settings()
+        if ha_s.get("token") and ha_s.get("url"):
+            ha_eids = [e["sensor"] for e in live_cfg.get("net_power", [])
+                       if e.get("source") == "homeassistant" and e.get("sensor")]
+            for eid in ha_eids:
+                try:
+                    r = _req.get(f"{ha_s['url']}/api/states/{eid}",
+                                 headers=_ha_headers(ha_s["token"]),
+                                 timeout=3, verify=False)
+                    if r.ok:
+                        ha_net_data[eid] = {"value": float(r.json().get("state", "nan"))}
+                except Exception:
+                    pass
+        return _resolve_slot("net_power", live_cfg, esphome_map, None, ha_net_data)
+    except Exception as exc:
+        log.debug("_read_live_net_w failed: %s", exc)
+        return None
+
+
 def _load_automation() -> dict:
     try:
         with open(AUTOMATION_FILE, "r", encoding="utf-8") as f:
@@ -3174,12 +3213,30 @@ def _automation_tick() -> None:
         log.debug("Automation: no plan cached yet – skipping")
         return
 
+    # ── Solar overproduction override ────────────────────────────────────────
+    # If the plan says "save" (battery passive) but we are currently exporting
+    # to the grid, switch to anti-feed (neutral) so the battery absorbs the
+    # surplus instead of feeding it back. Reverts to save the moment net power
+    # becomes positive (importing) again.
+    override_reason: str | None = None
+    effective_action = action
+    if action == "save":
+        net_w = _read_live_net_w()
+        if net_w is not None and net_w < -50:   # >50 W export → overproduction
+            effective_action = "neutral"
+            override_reason  = f"☀️ Zonne-overproductie ({abs(net_w):.0f} W export) – anti-feed actief"
+            log.info("Automation: save→neutral override (net_w=%.0fW, solar overproduction)", net_w)
+
     prev_action = auto.get("last_action")
-    if action == prev_action:
-        log.debug("Automation: action unchanged (%s) – no commands sent", action)
+    if effective_action == prev_action:
+        log.debug("Automation: action unchanged (%s) – no commands sent", effective_action)
+        # Still update override_reason in state so the UI can reflect live status
+        if auto.get("override_reason") != override_reason:
+            auto["override_reason"] = override_reason
+            _save_automation(auto)
         return
 
-    base_commands = list(_AUTOMATION_MODES.get(action, _AUTOMATION_MODES["neutral"]))
+    base_commands = list(_AUTOMATION_MODES.get(effective_action, _AUTOMATION_MODES["neutral"]))
     devices       = load_devices()
 
     if not devices:
@@ -3205,19 +3262,22 @@ def _automation_tick() -> None:
 
     commands = base_commands + extra_commands
 
-    log.info("Automation: action changed %s → %s  (devices=%d)",
-             prev_action or "none", action, len(devices))
+    log.info("Automation: action changed %s → %s%s  (devices=%d)",
+             prev_action or "none", effective_action,
+             f" [override from {action}]" if override_reason else "", len(devices))
     for device_id, device in devices.items():
         for domain, name, value in commands:
             result = send_esphome_command(device["ip"], device["port"], domain, name, value)
             if result.get("ok"):
-                log.info("Automation: ✓ %s → %s=%s  (device %s)", action, name, value, device_id)
+                log.info("Automation: ✓ %s → %s=%s  (device %s)", effective_action, name, value, device_id)
             else:
                 log.warning("Automation: ✗ %s → %s=%s  (device %s): %s",
-                            action, name, value, device_id, result.get("error"))
+                            effective_action, name, value, device_id, result.get("error"))
 
-    auto["last_action"]  = action
-    auto["last_applied"] = datetime.now(timezone.utc).isoformat()
+    auto["last_action"]    = effective_action   # what was actually sent to devices
+    auto["planned_action"] = action             # what the strategy intended
+    auto["override_reason"] = override_reason   # non-None when override active
+    auto["last_applied"]   = datetime.now(timezone.utc).isoformat()
     _save_automation(auto)
 
 
