@@ -28,17 +28,18 @@ export function saveFlowCfg(cfg) {
 // ---------------------------------------------------------------------------
 
 const SLOT_DEFS = {
-  solar_power: { label: "☀️ Zonne-energie",    unit: "W",  desc: "Positief = producerend. Verbergt solar-node als leeg." },
-  net_power:   { label: "⚡ Net vermogen",      unit: "W",  desc: "Positief = importeren van net." },
-  bat_power:   { label: "🔋 Batterijvermogen", unit: "W",  desc: "Positief = ontladen. Meerdere opgeteld." },
-  bat_soc:     { label: "🔋 Laadniveau (SOC)", unit: "%",  desc: "Laadstatus %. Meerdere = gemiddelde." },
-  ev_power:    { label: "🚗 EV-laadstroom",    unit: "W",  desc: "Positief = EV laden. Verbergt EV-node als leeg." },
-  voltage_l1:  { label: "L1 spanning",         unit: "V",  desc: "Fasespanning L1." },
-  voltage_l2:  { label: "L2 spanning",         unit: "V",  desc: "Fasespanning L2." },
-  voltage_l3:  { label: "L3 spanning",         unit: "V",  desc: "Fasespanning L3." },
+  solar_power: { label: "☀️ Zonne-energie",          unit: "W",  desc: "Positief = producerend. Verbergt solar-node als leeg." },
+  net_power:   { label: "⚡ Net vermogen",            unit: "W",  desc: "Positief = importeren van net." },
+  house_power: { label: "🏠 Totaal verbruik huis",   unit: "W",  desc: "Totaal huisverbruik (W). Wordt gebruikt voor overproductie-detectie. Laat leeg om te berekenen via zon + net." },
+  bat_power:   { label: "🔋 Batterijvermogen",       unit: "W",  desc: "Positief = ontladen. Meerdere opgeteld." },
+  bat_soc:     { label: "🔋 Laadniveau (SOC)",       unit: "%",  desc: "Laadstatus %. Meerdere = gemiddelde." },
+  ev_power:    { label: "🚗 EV-laadstroom",          unit: "W",  desc: "Positief = EV laden. Verbergt EV-node als leeg." },
+  voltage_l1:  { label: "L1 spanning",               unit: "V",  desc: "Fasespanning L1." },
+  voltage_l2:  { label: "L2 spanning",               unit: "V",  desc: "Fasespanning L2." },
+  voltage_l3:  { label: "L3 spanning",               unit: "V",  desc: "Fasespanning L3." },
 };
 
-export const SLOT_ORDER = ["solar_power","net_power","bat_power","bat_soc","ev_power","voltage_l1","voltage_l2","voltage_l3"];
+export const SLOT_ORDER = ["solar_power","net_power","house_power","bat_power","bat_soc","ev_power","voltage_l1","voltage_l2","voltage_l3"];
 
 const ESPHOME_SENSORS = [
   { key: "batPower",  label: "Batterijvermogen", unit: "W"  },

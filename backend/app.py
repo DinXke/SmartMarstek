@@ -3166,26 +3166,35 @@ def _read_live_flow_slots(*slot_keys: str) -> dict[str, float | None]:
 def _solar_overproduction_w() -> float | None:
     """Return how many watts solar exceeds house consumption right now.
     Positive = overproduction, negative = solar < consumption, None = unknown.
-    Uses solar_power and net_power from flow_cfg:
-      house_w = solar_w + net_w  (net positive = importing, negative = exporting)
-    This is independent of battery mode, so it never oscillates."""
-    slots = _read_live_flow_slots("solar_power", "net_power")
+    Priority:
+      1. house_power slot (direct HA sensor) + solar_power slot
+      2. solar_power + net_power: house = solar + net  (independent of battery mode)
+      3. solar_power + consumption profile from plan cache
+    """
+    slots   = _read_live_flow_slots("solar_power", "net_power", "house_power")
     solar_w = slots.get("solar_power")
     net_w   = slots.get("net_power")
+    house_w = slots.get("house_power")
+
     if solar_w is None:
         return None
+
+    # 1. Direct house sensor configured
+    if house_w is not None:
+        return solar_w - house_w
+
+    # 2. Derive house from solar + net (net independent of battery mode)
     if net_w is not None:
-        # house = solar + net (when net<0 we're exporting, house < solar)
-        house_w = solar_w + net_w
-        return solar_w - house_w   # = -net_w
-    # No net sensor: fall back to consumption profile for this hour
+        return solar_w - (solar_w + net_w)   # = -net_w
+
+    # 3. Fall back to consumption profile for this hour
     try:
         tz_name = _entsoe_settings().get("timezone", "Europe/Brussels")
         now_h   = datetime.now(ZoneInfo(tz_name)).hour
         cons_by_hour = _plan_cache.get("consumption_by_hour", {})
-        house_w = cons_by_hour.get(now_h) or cons_by_hour.get(str(now_h))
-        if house_w is not None:
-            return solar_w - float(house_w)
+        profile_w = cons_by_hour.get(now_h) or cons_by_hour.get(str(now_h))
+        if profile_w is not None:
+            return solar_w - float(profile_w)
     except Exception:
         pass
     return None
