@@ -140,11 +140,17 @@ def build_plan(
         return cons_by_hour.get(hour, 300.0)
 
     # ── Build 48 hourly price slots ──────────────────────────────────────────
-    # Expand prices to 1-hour buckets if they're quarter-hour
-    price_by_slot: dict[str, float] = {}  # key = "YYYY-MM-DDTHH:00" local
+    # Expand prices to 1-hour buckets if they're quarter-hour.
+    # Always convert to local timezone so keys match the all_slots keys below,
+    # regardless of whether the source is ENTSO-E (already local) or Frank (UTC).
+    price_by_slot: dict[str, float] = {}  # key = "YYYY-MM-DDTHH:00+offset" local
     for p in prices:
         try:
-            dt_local = datetime.fromisoformat(p["from"])
+            dt_raw = datetime.fromisoformat(p["from"])
+            if dt_raw.tzinfo is None:
+                dt_local = dt_raw.replace(tzinfo=tz)
+            else:
+                dt_local = dt_raw.astimezone(tz)
             # Round down to hour
             slot_key = dt_local.replace(minute=0, second=0, microsecond=0).isoformat()
             # Average if multiple sub-hour entries
