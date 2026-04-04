@@ -1,16 +1,19 @@
 /* =========================================================
    Marstek Dashboard – Global Styles
-   Dark professional energy-monitoring theme
+   Theme system: dark (default) | light | matrix
    ========================================================= */
 
-:root {
+/* ── Default / Dark theme ── */
+:root, [data-theme="dark"] {
   --bg: #0f172a;
   --bg-card: #1e293b;
   --bg-card-inner: #0f172a;
   --bg-card-hover: #243047;
+  --bg-header: rgba(15, 23, 42, 0.92);
   --border: #334155;
   --border-light: #475569;
   --text: #f1f5f9;
+  --text-primary: #f1f5f9;
   --text-muted: #94a3b8;
   --text-dim: #64748b;
   --green: #22c55e;
@@ -26,6 +29,8 @@
   --cyan: #06b6d4;
   --gray: #64748b;
   --gray-dim: #1e293b;
+  --accent: #6366f1;
+  --bg-hover: rgba(99, 102, 241, 0.1);
 
   --radius: 12px;
   --radius-sm: 8px;
@@ -35,6 +40,99 @@
 
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --transition: 0.18s ease;
+}
+
+/* ── Light theme ── */
+[data-theme="light"] {
+  --bg: #f1f5f9;
+  --bg-card: #ffffff;
+  --bg-card-inner: #f8fafc;
+  --bg-card-hover: #e2e8f0;
+  --bg-header: rgba(255, 255, 255, 0.92);
+  --border: #cbd5e1;
+  --border-light: #94a3b8;
+  --text: #0f172a;
+  --text-primary: #0f172a;
+  --text-muted: #475569;
+  --text-dim: #94a3b8;
+  --green: #16a34a;
+  --green-dim: #dcfce7;
+  --amber: #d97706;
+  --amber-dim: #fef3c7;
+  --red: #dc2626;
+  --red-dim: #fee2e2;
+  --blue: #2563eb;
+  --blue-dim: #dbeafe;
+  --purple: #9333ea;
+  --purple-dim: #f3e8ff;
+  --cyan: #0891b2;
+  --gray: #64748b;
+  --gray-dim: #f1f5f9;
+  --accent: #6366f1;
+  --bg-hover: rgba(99, 102, 241, 0.08);
+
+  --shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+/* ── Matrix theme ── */
+[data-theme="matrix"] {
+  --bg: #000000;
+  --bg-card: #0a0a0a;
+  --bg-card-inner: #000000;
+  --bg-card-hover: #0d1a0d;
+  --bg-header: rgba(0, 0, 0, 0.95);
+  --border: #003300;
+  --border-light: #005500;
+  --text: #00ff41;
+  --text-primary: #00ff41;
+  --text-muted: #00bb30;
+  --text-dim: #007718;
+  --green: #00ff41;
+  --green-dim: #003300;
+  --amber: #aaff00;
+  --amber-dim: #1a2200;
+  --red: #ff3333;
+  --red-dim: #330000;
+  --blue: #00ccff;
+  --blue-dim: #001a22;
+  --purple: #cc00ff;
+  --purple-dim: #1a0022;
+  --cyan: #00ffcc;
+  --gray: #007718;
+  --gray-dim: #050f05;
+  --accent: #00ff41;
+  --bg-hover: rgba(0, 255, 65, 0.08);
+
+  --shadow: 0 4px 24px rgba(0, 255, 65, 0.08);
+  --shadow-sm: 0 2px 8px rgba(0, 255, 65, 0.05);
+
+  --font: "Courier New", "Lucida Console", monospace;
+}
+
+/* Matrix: glowing borders and text on cards */
+[data-theme="matrix"] .device-card,
+[data-theme="matrix"] .card,
+[data-theme="matrix"] .strat-day-panel,
+[data-theme="matrix"] .settings-section,
+[data-theme="matrix"] .automation-bar {
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.12), inset 0 0 1px rgba(0, 255, 65, 0.05);
+}
+
+/* Matrix: subtle scanline effect */
+[data-theme="matrix"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.03) 2px,
+    rgba(0, 0, 0, 0.03) 4px
+  );
+  z-index: 9999;
 }
 
 *, *::before, *::after {
@@ -73,7 +171,7 @@ html, body {
   position: sticky;
   top: 0;
   z-index: 100;
-  background: rgba(15, 23, 42, 0.92);
+  background: var(--bg-header);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
   padding: 0 24px;

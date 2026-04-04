@@ -8,7 +8,45 @@ import SettingsPage from "./components/SettingsPage.jsx";
 import EnergyMap from "./components/EnergyMap.jsx";
 import HomeWizardPanel from "./components/HomeWizardPanel.jsx";
 
+const THEMES = [
+  { id: "dark",   icon: "🌙", label: "Dark"   },
+  { id: "light",  icon: "☀️", label: "Light"  },
+  { id: "matrix", icon: "🟩", label: "Matrix" },
+];
+
+function useTheme() {
+  const [theme, setThemeState] = useState(
+    () => localStorage.getItem("marstek_theme") || "dark"
+  );
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("marstek_theme", theme);
+  }, [theme]);
+  return [theme, setThemeState];
+}
+
+function ThemeToggle() {
+  const [theme, setTheme] = useTheme();
+  const current = THEMES.find((t) => t.id === theme) || THEMES[0];
+  const next    = THEMES[(THEMES.findIndex((t) => t.id === theme) + 1) % THEMES.length];
+  return (
+    <button
+      className="btn btn-ghost btn-sm"
+      onClick={() => setTheme(next.id)}
+      title={`Schakel naar ${next.label} thema`}
+      style={{ gap: 4, fontSize: 12 }}
+    >
+      {current.icon} {current.label}
+    </button>
+  );
+}
+
 export default function App() {
+  // Apply saved theme immediately on mount
+  useEffect(() => {
+    const saved = localStorage.getItem("marstek_theme") || "dark";
+    document.documentElement.setAttribute("data-theme", saved);
+  }, []);
   const [page, setPage]       = useState("batteries"); // "batteries" | "prices" | "forecast" | "strategy" | "settings"
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -102,11 +140,14 @@ export default function App() {
           </button>
         </nav>
 
-        {page === "batteries" && (
-          <button className="btn btn-primary" onClick={() => setShowAdd(true)}>
-            + Toevoegen
-          </button>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <ThemeToggle />
+          {page === "batteries" && (
+            <button className="btn btn-primary" onClick={() => setShowAdd(true)}>
+              + Toevoegen
+            </button>
+          )}
+        </div>
       </header>
 
       {/* ── Main ── */}
