@@ -1298,7 +1298,31 @@ def poll_ha_sensors():
 
 FORECAST_SETTINGS_FILE = os.path.join(BASE_DIR, "forecast_settings.json")
 _forecast_cache: dict = {"data": None, "ts": 0}
-FORECAST_CACHE_TTL = 900  # 15 minutes
+FORECAST_CACHE_TTL    = 3600   # 1 hour in-memory TTL
+FORECAST_CACHE_FILE   = os.path.join(DATA_DIR, "forecast_cache.json")
+FORECAST_DISK_TTL     = 3600   # also 1 hour on disk — survives add-on restarts
+
+
+def _load_forecast_disk_cache() -> None:
+    """Restore in-memory forecast cache from disk on startup."""
+    try:
+        with open(FORECAST_CACHE_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        if time.time() - saved.get("ts", 0) < FORECAST_DISK_TTL:
+            _forecast_cache["data"] = saved["data"]
+            _forecast_cache["ts"]   = saved["ts"]
+            log.info("forecast: restored from disk cache (age=%.0fs)",
+                     time.time() - saved["ts"])
+    except Exception:
+        pass
+
+
+def _save_forecast_disk_cache() -> None:
+    try:
+        with open(FORECAST_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"data": _forecast_cache["data"], "ts": _forecast_cache["ts"]}, f)
+    except Exception as exc:
+        log.debug("forecast: disk cache write failed: %s", exc)
 
 def _forecast_settings() -> dict:
     if os.path.exists(FORECAST_SETTINGS_FILE):
@@ -1355,6 +1379,10 @@ def _fetch_forecast(s: dict) -> dict:
             url = f"https://api.forecast.solar/estimate/{lat}/{lon}/{dec}/{az}/{kwp}"
         try:
             resp = _req.get(url, timeout=15)
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("X-Ratelimit-Period", 3600))
+                raise Exception(f"429 Too Many Requests – probeer opnieuw over {retry_after}s "
+                                f"(forecast.solar limiet bereikt)")
             resp.raise_for_status()
             data = resp.json()
             w  = data.get("result", {}).get("watts", {})
@@ -1387,8 +1415,17 @@ def get_forecast_estimate():
         return jsonify(_forecast_cache["data"])
 
     result = _fetch_forecast(s)
+    # If all strings failed (e.g. 429), keep serving the stale cache
+    # so the UI doesn't lose its forecast data and we don't hammer the API.
+    if result["errors"] and not result["watts"] and _forecast_cache["data"]:
+        log.warning("forecast: fetch failed (%s) – serving stale cache", result["errors"])
+        stale = dict(_forecast_cache["data"])
+        stale["stale"] = True
+        stale["fetch_error"] = result["errors"][0]
+        return jsonify(stale)
     _forecast_cache["data"] = result
     _forecast_cache["ts"]   = now
+    _save_forecast_disk_cache()
     return jsonify(result)
 
 
@@ -3363,8 +3400,9 @@ def set_automation():
 
 
 if __name__ == "__main__":
-    # Restore persisted plan cache so Claude is not re-called after restarts
+    # Restore persisted caches so external APIs are not hammered after restarts
     _restore_plan_cache()
+    _load_forecast_disk_cache()
     # Start InfluxDB background writer
     start_background_writer(_influx_context, interval=30)
     # Start automation background thread
