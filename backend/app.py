@@ -1298,9 +1298,9 @@ def poll_ha_sensors():
 
 FORECAST_SETTINGS_FILE = os.path.join(BASE_DIR, "forecast_settings.json")
 _forecast_cache: dict = {"data": None, "ts": 0}
-FORECAST_CACHE_TTL    = 3600   # 1 hour in-memory TTL
+FORECAST_CACHE_TTL    = 900    # 15 min in-memory TTL (Personal Pro = 1 req/15min)
 FORECAST_CACHE_FILE   = os.path.join(DATA_DIR, "forecast_cache.json")
-FORECAST_DISK_TTL     = 3600   # also 1 hour on disk — survives add-on restarts
+FORECAST_DISK_TTL     = 900    # also 15 min on disk — survives add-on restarts
 
 
 def _load_forecast_disk_cache() -> None:
