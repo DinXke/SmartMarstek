@@ -41,13 +41,21 @@ function ThemeToggle() {
   );
 }
 
+const NAV_ITEMS = [
+  { id: "batteries", icon: "🔋", label: "Batterijen"       },
+  { id: "prices",    icon: "⚡", label: "Prijzen"           },
+  { id: "forecast",  icon: "☀️", label: "Voorspelling"     },
+  { id: "strategy",  icon: "🧠", label: "Strategie"        },
+  { id: "settings",  icon: "⚙️", label: "Instellingen"     },
+];
+
 export default function App() {
   // Apply saved theme immediately on mount
   useEffect(() => {
     const saved = localStorage.getItem("marstek_theme") || "dark";
     document.documentElement.setAttribute("data-theme", saved);
   }, []);
-  const [page, setPage]       = useState("batteries"); // "batteries" | "prices" | "forecast" | "strategy" | "settings"
+  const [page, setPage]       = useState("batteries");
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
@@ -101,54 +109,45 @@ export default function App() {
         <div className="app-header-brand">
           <span className="app-header-logo">🔋</span>
           <div>
-            <div className="app-header-title">Marstek Dashboard</div>
-            <div className="app-header-subtitle">ESPHome Battery Monitor</div>
+            <div className="app-header-title">Marstek</div>
+            <div className="app-header-subtitle app-header-subtitle--desktop">ESPHome Battery Monitor</div>
           </div>
         </div>
 
-        {/* Navigation */}
-        <nav className="app-nav">
-          <button
-            className={`nav-btn ${page === "batteries" ? "active" : ""}`}
-            onClick={() => setPage("batteries")}
-          >
-            🔋 Batterijen
-          </button>
-          <button
-            className={`nav-btn ${page === "prices" ? "active" : ""}`}
-            onClick={() => setPage("prices")}
-          >
-            ⚡ Energieprijzen
-          </button>
-          <button
-            className={`nav-btn ${page === "forecast" ? "active" : ""}`}
-            onClick={() => setPage("forecast")}
-          >
-            ☀️ Zonne-voorspelling
-          </button>
-          <button
-            className={`nav-btn ${page === "strategy" ? "active" : ""}`}
-            onClick={() => setPage("strategy")}
-          >
-            🧠 Laadstrategie
-          </button>
-          <button
-            className={`nav-btn ${page === "settings" ? "active" : ""}`}
-            onClick={() => setPage("settings")}
-          >
-            ⚙️ Instellingen
-          </button>
+        {/* Desktop navigation */}
+        <nav className="app-nav app-nav--desktop">
+          {NAV_ITEMS.map((n) => (
+            <button key={n.id}
+              className={`nav-btn ${page === n.id ? "active" : ""}`}
+              onClick={() => setPage(n.id)}
+            >
+              {n.icon} {n.label}
+            </button>
+          ))}
         </nav>
 
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <ThemeToggle />
           {page === "batteries" && (
-            <button className="btn btn-primary" onClick={() => setShowAdd(true)}>
+            <button className="btn btn-primary btn--add-desktop" onClick={() => setShowAdd(true)}>
               + Toevoegen
             </button>
           )}
         </div>
       </header>
+
+      {/* ── Mobile bottom nav ── */}
+      <nav className="app-nav--mobile">
+        {NAV_ITEMS.map((n) => (
+          <button key={n.id}
+            className={`mobile-nav-btn ${page === n.id ? "active" : ""}`}
+            onClick={() => setPage(n.id)}
+          >
+            <span className="mobile-nav-icon">{n.icon}</span>
+            <span className="mobile-nav-label">{n.label}</span>
+          </button>
+        ))}
+      </nav>
 
       {/* ── Main ── */}
       <main className="app-main">
@@ -214,6 +213,11 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* Mobile FAB for adding devices */}
+      {page === "batteries" && (
+        <button className="fab" onClick={() => setShowAdd(true)} title="Apparaat toevoegen">+</button>
+      )}
 
       {showAdd && (
         <AddDeviceModal onClose={() => setShowAdd(false)} onAdded={handleDeviceAdded} />

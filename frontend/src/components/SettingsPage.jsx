@@ -358,10 +358,13 @@ function TabApparaten({ devices, powerMap, onDeviceAdded, onDeviceEdited, onDevi
 // ---------------------------------------------------------------------------
 
 const TABS = [
-  { id: "apparaten",   label: "🔋 Apparaten"   },
-  { id: "bronnen",     label: "⚡ Bronnen"      },
-  { id: "integraties", label: "🔌 Integraties"  },
-  { id: "debug",       label: "🛠️ Debug"        },
+  { id: "apparaten", label: "🔋 Apparaten" },
+  { id: "bronnen",   label: "⚡ Bronnen"   },
+  { id: "prijzen",   label: "💶 Prijzen"   },
+  { id: "zon",       label: "☀️ Zon"       },
+  { id: "strategie", label: "🧠 Strategie" },
+  { id: "data",      label: "🗄️ Data"      },
+  { id: "debug",     label: "🛠️ Debug"     },
 ];
 
 export default function SettingsPage({ devices, powerMap, onDeviceAdded, onDeviceEdited, onDeviceDeleted }) {
@@ -393,14 +396,25 @@ export default function SettingsPage({ devices, powerMap, onDeviceAdded, onDevic
         <FlowSourcesSettings devices={devices} powerMap={powerMap ?? {}} />
       )}
 
-      {tab === "integraties" && (
+      {tab === "prijzen" && (
         <>
-          <HomeWizardSettings />
-          <HomeAssistantSettings />
-          <ForecastSettings />
           <EntsoESection />
+          <HomeAssistantSettings />
+        </>
+      )}
+
+      {tab === "zon" && (
+        <ForecastSettings />
+      )}
+
+      {tab === "strategie" && (
+        <StrategySettings />
+      )}
+
+      {tab === "data" && (
+        <>
           <InfluxSettings />
-          <StrategySettings />
+          <HomeWizardSettings />
         </>
       )}
 

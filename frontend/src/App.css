@@ -218,10 +218,48 @@ html, body {
   gap: 24px;
 }
 
-@media (max-width: 600px) {
-  .app-main { padding: 12px; }
-  .device-grid { grid-template-columns: 1fr; gap: 12px; }
-  .app-header { padding: 0 12px; }
+/* ── Tablet ── */
+@media (max-width: 900px) {
+  .nav-btn { padding: 7px 12px; font-size: 13px; }
+  .app-main { padding: 16px; }
+  .device-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Mobile ── */
+@media (max-width: 640px) {
+  /* Header: compact */
+  .app-header { padding: 0 12px; height: 52px; }
+  .app-header-subtitle--desktop { display: none; }
+  .app-header-title { font-size: 16px; }
+  .app-header-logo  { font-size: 18px; }
+  .btn--add-desktop { display: none; }   /* replaced by FAB */
+
+  /* Hide desktop nav, show bottom nav */
+  .app-nav--desktop { display: none; }
+  .app-nav--mobile {
+    display: flex;
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    z-index: 150;
+    background: var(--bg-header);
+    backdrop-filter: blur(12px);
+    border-top: 1px solid var(--border);
+    padding: 4px 0 max(4px, env(safe-area-inset-bottom));
+  }
+
+  /* Show FAB */
+  .fab { display: flex; align-items: center; justify-content: center; }
+
+  /* Push main content up so bottom nav doesn't cover it */
+  .app-main { padding: 12px 12px 80px; }
+  .device-grid { grid-template-columns: 1fr; gap: 10px; }
+
+  /* Settings tabs scrollable on mobile */
+  .settings-tabs { overflow-x: auto; flex-wrap: nowrap; }
+  .settings-tab  { white-space: nowrap; flex-shrink: 0; }
+
+  /* Strategy timeline: smaller font */
+  .strat-hour-label { font-size: 9px; }
 }
 
 /* =========================================================
@@ -975,10 +1013,11 @@ html, body {
    App navigation bar
    ========================================================= */
 
-.app-nav {
+/* ── Desktop top nav ── */
+.app-nav--desktop {
   display: flex;
   gap: 4px;
-  background: var(--bg-card-inner, #0f172a);
+  background: var(--bg-card-inner);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 4px;
@@ -996,8 +1035,56 @@ html, body {
   transition: background 0.15s, color 0.15s;
   white-space: nowrap;
 }
-.nav-btn:hover  { background: rgba(255,255,255,0.06); color: var(--text); }
+.nav-btn:hover  { background: var(--bg-hover); color: var(--text); }
 .nav-btn.active { background: var(--bg-card); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+
+/* ── Mobile bottom nav ── */
+.app-nav--mobile {
+  display: none;
+}
+
+.mobile-nav-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 6px 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s;
+  min-width: 0;
+}
+.mobile-nav-btn.active { color: var(--accent); }
+.mobile-nav-btn:hover  { color: var(--text); }
+
+.mobile-nav-icon  { font-size: 20px; line-height: 1; }
+.mobile-nav-label { font-size: 10px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+/* ── FAB (floating action button) for mobile ── */
+.fab {
+  display: none;
+  position: fixed;
+  bottom: 76px;   /* above bottom nav */
+  right: 20px;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--blue);
+  color: #fff;
+  font-size: 24px;
+  line-height: 1;
+  border: none;
+  cursor: pointer;
+  z-index: 200;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  transition: transform 0.15s, background 0.15s;
+}
+.fab:hover  { background: #2563eb; transform: scale(1.06); }
+.fab:active { transform: scale(0.95); }
 
 /* =========================================================
    Prices page
@@ -1591,10 +1678,13 @@ html, body {
   border-bottom: 1px solid var(--border);
   margin-bottom: 24px;
   flex-wrap: wrap;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+.settings-tabs::-webkit-scrollbar { display: none; }
 
 .settings-tab {
-  padding: 8px 18px;
+  padding: 8px 16px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg-card);
@@ -1603,6 +1693,8 @@ html, body {
   font-weight: 500;
   cursor: pointer;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .settings-tab:hover {
@@ -1614,6 +1706,15 @@ html, body {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+/* On very small screens, show settings tabs as icon-only pills */
+@media (max-width: 480px) {
+  .settings-tab {
+    padding: 8px 10px;
+    font-size: 16px;
+    /* Keep only the first character (emoji) visible, hide text */
+  }
 }
 
 /* =========================================================
