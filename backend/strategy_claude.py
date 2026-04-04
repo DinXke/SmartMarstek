@@ -18,6 +18,7 @@ retrieved with get_last_debug().
 
 import json
 import logging
+import os
 import time as _time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -26,6 +27,67 @@ from zoneinfo import ZoneInfo
 log = logging.getLogger("strategy_claude")
 
 WEEKDAY_NL = ["Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag", "Zaterdag", "Zondag"]
+
+# Haiku 4.5 pricing (USD per token, converted to EUR at 0.92)
+_PRICE_IN_EUR_PER_TOKEN  = 0.80 / 1_000_000 * 0.92   # $0.80/MTok input
+_PRICE_OUT_EUR_PER_TOKEN = 4.00 / 1_000_000 * 0.92   # $4.00/MTok output
+
+# ---------------------------------------------------------------------------
+# Usage ledger — persisted to /data/claude_usage.json
+# ---------------------------------------------------------------------------
+
+_DATA_DIR    = os.environ.get("MARSTEK_DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+_USAGE_FILE  = os.path.join(_DATA_DIR, "claude_usage.json")
+
+
+def _load_usage() -> list[dict]:
+    """Load all usage records from disk. Returns list of {ran_at, model, in, out, eur}."""
+    try:
+        with open(_USAGE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _append_usage(ran_at: str, model: str, in_tok: int, out_tok: int, eur: float) -> None:
+    """Append one usage record and prune entries older than 366 days."""
+    records = _load_usage()
+    records.append({"ran_at": ran_at, "model": model,
+                    "in": in_tok, "out": out_tok, "eur": round(eur, 6)})
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=366)).isoformat()
+    records = [r for r in records if r.get("ran_at", "") >= cutoff]
+    try:
+        with open(_USAGE_FILE, "w", encoding="utf-8") as f:
+            json.dump(records, f)
+    except Exception as e:
+        log.warning("claude_usage: write failed: %s", e)
+
+
+def get_usage_stats() -> dict:
+    """Return aggregated usage: today / this week / this month / all-time."""
+    records = _load_usage()
+    now     = datetime.now(timezone.utc)
+
+    day_start   = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    week_start  = (now - timedelta(days=now.weekday())).replace(
+                    hour=0, minute=0, second=0, microsecond=0).isoformat()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    def _agg(recs):
+        calls = len(recs)
+        in_t  = sum(r["in"]  for r in recs)
+        out_t = sum(r["out"] for r in recs)
+        eur   = sum(r["eur"] for r in recs)
+        return {"calls": calls, "tokens_in": in_t, "tokens_out": out_t, "eur": round(eur, 5)}
+
+    return {
+        "today":     _agg([r for r in records if r.get("ran_at", "") >= day_start]),
+        "this_week": _agg([r for r in records if r.get("ran_at", "") >= week_start]),
+        "this_month":_agg([r for r in records if r.get("ran_at", "") >= month_start]),
+        "all_time":  _agg(records),
+        "records":   len(records),
+    }
+
 
 # ---------------------------------------------------------------------------
 # Last-run debug info (read by app.py after build_plan_claude returns)
@@ -515,13 +577,20 @@ def build_plan_claude(
         })
 
     # ── Store debug info ──────────────────────────────────────────────────
+    _in_tok  = getattr(response.usage, "input_tokens",  0) or 0
+    _out_tok = getattr(response.usage, "output_tokens", 0) or 0
+    _eur     = _in_tok * _PRICE_IN_EUR_PER_TOKEN + _out_tok * _PRICE_OUT_EUR_PER_TOKEN
+    _ran_at  = datetime.now(timezone.utc).isoformat()
+    _append_usage(_ran_at, model, _in_tok, _out_tok, _eur)
+
     _set_debug(
         fallback=False,
         model=model,
-        ran_at=datetime.now(timezone.utc).isoformat(),
+        ran_at=_ran_at,
         elapsed_s=elapsed,
-        input_tokens=getattr(response.usage, "input_tokens", None),
-        output_tokens=getattr(response.usage, "output_tokens", None),
+        input_tokens=_in_tok,
+        output_tokens=_out_tok,
+        cost_eur=round(_eur, 6),
         stop_reason=getattr(response, "stop_reason", None),
         slots_sent=len(slots_input),
         slots_received=len(plan_actions),

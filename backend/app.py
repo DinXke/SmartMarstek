@@ -1913,6 +1913,16 @@ def _query_ha_hourly_consumption(days: int = 21) -> list[dict]:
     return result
 
 
+@app.route("/api/claude/usage")
+def get_claude_usage():
+    """Aggregated Claude API usage: today / this week / this month / all-time."""
+    try:
+        import strategy_claude as _sc
+        return jsonify(_sc.get_usage_stats())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/ha/consumption-debug")
 def ha_consumption_debug():
     """

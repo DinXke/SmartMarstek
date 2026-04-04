@@ -413,7 +413,16 @@ const ACTION_LABEL_SHORT = {
 };
 
 function ClaudeDebugPanel({ debug, plan }) {
-  const [open, setOpen] = useState(false);
+  const [open,  setOpen]  = useState(false);
+  const [usage, setUsage] = useState(null);
+
+  useEffect(() => {
+    fetch("api/claude/usage")
+      .then((r) => r.ok ? r.json() : null)
+      .then(setUsage)
+      .catch(() => {});
+  }, [debug?.ran_at]);  // re-fetch whenever a new run happens
+
   if (!debug) return null;
 
   const modelShort = (debug.model || "")
@@ -465,6 +474,27 @@ function ClaudeDebugPanel({ debug, plan }) {
               <span style={{ color: "var(--text-muted)", fontSize: 10 }}>
                 prijzen-fp: <code style={{ color: "var(--text-dim)" }}>{fp}</code>
                 {" · "}Claude enkel herberekend bij nieuwe prijzen
+              </span>
+            )}
+            {usage && (
+              <span style={{
+                marginLeft: "auto", fontSize: 11, color: "var(--text-muted)",
+                display: "flex", gap: 10, flexWrap: "wrap",
+              }}>
+                {[
+                  ["Vandaag",    usage.today],
+                  ["Deze week",  usage.this_week],
+                  ["Deze maand", usage.this_month],
+                ].map(([label, s]) => s && s.calls > 0 && (
+                  <span key={label}>
+                    {label}:{" "}
+                    <strong style={{ color: "var(--text)" }}>
+                      {s.calls}× · {s.eur < 0.001
+                        ? `${(s.eur * 100).toFixed(3)} ct`
+                        : `€${s.eur.toFixed(4)}`}
+                    </strong>
+                  </span>
+                ))}
               </span>
             )}
             {debug.action_counts && (
