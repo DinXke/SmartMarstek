@@ -270,36 +270,52 @@ def build_plan(
                 reason = "Batterij vol of minimale overschot"
 
         elif buy_price is not None:
-            # Look ahead: max price in next 8 hours
-            future_prices = []
+            # Look ahead: max price in next 8 hours (for charge profitability)
+            future_prices_8 = []
             for j in range(i + 1, min(i + 9, num_slots)):
                 fp = price_slots.get(all_slots[j].isoformat())
                 if fp is not None:
-                    future_prices.append(fp + markup)
-            max_future = max(future_prices) if future_prices else buy_price
+                    future_prices_8.append(fp + markup)
+            max_future = max(future_prices_8) if future_prices_8 else buy_price
+
+            # Best price in next 16 hours (for discharge reservation decisions)
+            future_prices_16 = []
+            for j in range(i + 1, min(i + 17, num_slots)):
+                fp = price_slots.get(all_slots[j].isoformat())
+                if fp is not None:
+                    future_prices_16.append(fp + markup)
+            best_future_16 = max(future_prices_16) if future_prices_16 else buy_price
+
             is_peak_hour = _is_peak(weekday, hour)
 
-            # Effective charge cost = buy_price / rte + depreciation
-            eff_charge_cost = buy_price / rte + depr
-
-            # Worth charging from grid if we can sell (save) at a higher future price
-            can_profit = (eff_charge_cost + depr) < (max_future - depr)
+            # Effective charge cost = buy_price / rte + charge depreciation.
+            # NOTE: discharge depreciation is NOT subtracted here — it applies
+            # to the discharge decision, not the charge decision.  The correct
+            # profitability check is simply: charge_cost < future_savings.
+            eff_charge_cost = buy_price / rte + depr   # ct/kWh stored
+            can_profit = eff_charge_cost < max_future  # worth pre-charging?
             is_cheap   = buy_price < p25 * 1.05
 
-            if is_peak_hour and bat_kwh > bat_min + 0.2:
-                # Peak consumption hour: discharge battery
-                discharge_possible = min(cons_wh_slot / 1000.0, bat_kwh - bat_min)
-                if discharge_possible > 0.05:
-                    bat_kwh      -= discharge_possible
-                    discharge_kwh = discharge_possible
-                    action = DISCHARGE
-                    reason = f"Piekuur verbruik ~{cons_wh_slot:.0f} Wh"
+            if is_peak_hour and bat_kwh > bat_min + 0.2 and buy_price >= price_median:
+                # Peak hour AND price is at or above the day's median.
+                # If a much better (>15%) discharge opportunity is within 16h,
+                # hold the charge for that instead.
+                if best_future_16 > buy_price * 1.15:
+                    action = SAVE
+                    reason = f"Sparen voor duurder uur ({best_future_16*100:.0f}ct)"
                 else:
-                    action = NEUTRAL
-                    reason = "Batterij te leeg voor ontladen"
+                    discharge_possible = min(cons_wh_slot / 1000.0, bat_kwh - bat_min)
+                    if discharge_possible > 0.05:
+                        bat_kwh      -= discharge_possible
+                        discharge_kwh = discharge_possible
+                        action = DISCHARGE
+                        reason = f"Piekuur verbruik ~{cons_wh_slot:.0f} Wh"
+                    else:
+                        action = NEUTRAL
+                        reason = "Batterij te leeg voor ontladen"
 
             elif is_cheap and can_profit and bat_kwh < bat_max - 0.2:
-                # Cheap grid electricity + future savings justify charging
+                # Cheap grid electricity + profitable vs future price → charge
                 can_add_kwh  = bat_max - bat_kwh
                 charge_kwh   = min(can_add_kwh / rte, max_charge_kw)
                 bat_kwh     += charge_kwh * rte
@@ -308,13 +324,17 @@ def build_plan(
                           f"piek later {max_future*100:.1f}ct")
 
             elif buy_price > p75 and bat_kwh > bat_min + 0.2:
-                # Expensive slot: use battery
-                discharge_possible = min(cons_wh_slot / 1000.0, bat_kwh - bat_min)
-                if discharge_possible > 0.05:
-                    bat_kwh      -= discharge_possible
-                    discharge_kwh = discharge_possible
-                    action = DISCHARGE
-                    reason = f"Duur net ({buy_price*100:.1f}ct/kWh)"
+                # Expensive slot: use battery — but save for even better hours
+                if best_future_16 > buy_price * 1.15:
+                    action = SAVE
+                    reason = f"Sparen voor duurder uur ({best_future_16*100:.0f}ct)"
+                else:
+                    discharge_possible = min(cons_wh_slot / 1000.0, bat_kwh - bat_min)
+                    if discharge_possible > 0.05:
+                        bat_kwh      -= discharge_possible
+                        discharge_kwh = discharge_possible
+                        action = DISCHARGE
+                        reason = f"Duur net ({buy_price*100:.1f}ct/kWh)"
 
             elif bat_kwh > bat_min + 0.3 and buy_price > price_median:
                 # Battery has charge and upcoming peak: hold it
