@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.19.40] - 2026-04-05
+
+### Fixed
+- Claude AI modus: Frank Energie prijzen kregen onterecht een extra nettarief
+  (0.133 €/kWh) bovenop de al-inclusief prijs, waardoor koopprijzen ~13ct te
+  hoog lagen en grid_charge minder snel getriggerd werd
+- Claude AI prompt: near-negatieve/goedkope middagprijzen triggeren nu
+  `grid_charge` ook als er zon is — `solar_charge` werd te snel verkozen boven
+  goedkope netstroom; de "1–2 uren per dag" beperking is verwijderd
+- Claude AI prompt: `grid_charge` heeft nu expliciet hogere prioriteit dan
+  `solar_charge` bij uren met prijs ≤ p25, zodat de batterij zo snel mogelijk
+  gevuld wordt met goedkope stroom
+
 ## [1.19.39] - 2026-04-05
 
 ### Fixed

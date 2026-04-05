@@ -136,23 +136,31 @@ Houd rekening met: energieprijzen per uur, zonneopbrengst, verwacht verbruik, ba
 | Actie | Wat de batterij doet | Typische situatie |
 |---|---|---|
 | `solar_charge` | Laadt op met zonne-overschot | net_wh > 200 Wh én SOC < max |
-| `grid_charge` | Laadt op via het net (actief) | prijs ≤ p25 én een uur > break-even volgt later |
+| `grid_charge` | Laadt op via het net (actief) | prijs ≤ p25 OF prijs < 5ct én een winstgevend uur volgt; ook bij zonne-uren met goedkope prijs |
 | `save` | **Doet NIETS — SOC gefixeerd** | prijs nu ≤ mediaan maar duurder uur nadert (> 20% meer) binnen 6u |
 | `discharge` | Levert consumption_wh aan huis | prijs > p75 of duurste uur, SOC > reserve |
 | `neutral` | **Ontlaadt voor verbruik** (anti-feed) | geen bijzondere reden, laat firmware beheren |
 
 ## Aanpak — volg deze stappen in volgorde
-1. **Prijscurve analyseren**: identificeer goedkope dalen (≤ p25) en dure pieken (≥ p75).
-2. **Grid_charge plannen**: laad goedkoop op als break-even < een duurder uur later:
+1. **Prijscurve analyseren**: identificeer goedkope dalen (≤ p25), dure pieken (≥ p75), en **near-negatieve uren** (prijs < 5ct of negatief).
+
+2. **Grid_charge plannen** — dit is de HOOGSTE prioriteit bij goedkope uren:
    - Break-even = buy_price / rte + depreciation_eur_kwh (staat in battery.breakeven_grid_charge_eur_kwh)
-   - Plan grid_charge alleen bij prijs ≤ p25 én er een uur volgt ≥ break-even.
-   - Laad 1–2 goedkoopste uren per dag, niet elk goedkoop uur.
+   - **Gebruik grid_charge bij elk uur waarvoor geldt:** prijs ≤ p25 OF prijs < 5ct, én er volgt een uur ≥ break-even, én SOC < max_soc_pct.
+   - **Near-negatieve of negatieve prijzen (< 2ct):** gebruik ALTIJD grid_charge als SOC < max — dit is bijna gratis laden.
+   - **Goedkope zonne-uren (prijs ≤ p25 én net_wh > 0):** gebruik grid_charge (NIET solar_charge) om de batterij zo snel mogelijk vol te laden met goedkope netstroom én zonne-overschot samen. Solar_charge alleen als de prijs NIET goedkoop is.
+   - Laad elk uur dat goedkoop genoeg is, zolang SOC < max. Geen kunstmatig limiet op het aantal grid_charge uren.
+   - Goedkoopste uren krijgen prioriteit, ongeacht tijdstip (overdag even goed als nacht).
+
 3. **Discharge plannen**: gebruik batterij bij prijs ≥ p75 of de 3–5 duurste uren van de dag, als SOC > reserve.
+
 4. **Save plannen** (PRIORITEIT boven neutral bij hoge prijs nadert):
    - Als huidig uur lagere prijs heeft dan een uur binnen de volgende 6 uur (≥ 20% duurder), gebruik `save`.
    - Voorbeeld: 18u = 0.20€, 19u = 0.23€ → save op 18u, discharge op 19u.
    - "Ik wil de batterij bewaren" = `save`, NIET `neutral`.
-5. **Solar_charge**: net_wh > 200 Wh én SOC < max_soc.
+
+5. **Solar_charge**: net_wh > 200 Wh én SOC < max_soc én prijs > p25 (als prijs ≤ p25 → gebruik grid_charge zoals hierboven).
+
 6. **Neutral**: enkel als geen van bovenstaande van toepassing is EN huidig uur is geen probleem om te ontladen.
 
 ## SOC-simulatie (houd dit bij)
@@ -175,13 +183,14 @@ Houd rekening met: energieprijzen per uur, zonneopbrengst, verwacht verbruik, ba
 ## Typisch dagpatroon (Belgische gezinswoning)
 - **00–06u**: sluipverbruik (~200–400 Wh/u), prijzen laag → neutral (batterij ontlaadt langzaam, OK)
 - **07–09u**: ochtendpiek (500–800 Wh/u), prijs vaak hoog → discharge of save als 2u later nog duurder
-- **10–15u**: zonne-overschot → solar_charge; geen zon: neutral
+- **10–15u**: zonne-overschot → solar_charge als prijs normaal; maar als prijs ≤ p25 → gebruik grid_charge om batterij snel vol te laden met goedkope stroom + zon samen
 - **16–20u**: avondpiek + hoge prijzen → discharge bij p75-uren; save 1u vóór het duurste uur
 - **21–24u**: laag verbruik → neutral of grid_charge als morgen duurder
 
 ## Kritische fouten (absoluut vermijden)
 - ❌ `neutral` zeggen maar bedoelen "ik wil de lading bewaren" → gebruik `save`
 - ❌ `neutral` met reden "spaar voor later" → dat is een contradictie, gebruik `save`
+- ❌ `solar_charge` bij uren met prijs ≤ p25 terwijl SOC < max — gebruik `grid_charge` om ook goedkope netstroom te benutten
 - ❌ discharge als SOC ≤ min_reserve_soc_pct
 - ❌ grid_charge als SOC ≥ max_soc_pct
 - ❌ solar_charge als net_wh ≤ 0
@@ -242,7 +251,14 @@ def build_plan_claude(
     min_soc_f     = float(s["min_reserve_soc"]) / 100.0
     max_soc_f     = float(s["max_soc"]) / 100.0
     max_charge_kw = float(s["max_charge_kw"])
-    markup        = float(s.get("grid_markup_eur_kwh", 0.133))
+    # Frank Energie prices are already all-in (include all taxes + sourcing markup).
+    # Adding grid_markup_eur_kwh on top would double-count the energy taxes.
+    # Only add markup for ENTSO-E prices (which are raw wholesale market prices).
+    price_source_used = s.get("price_source", "entsoe")
+    if price_source_used == "frank":
+        markup = 0.0
+    else:
+        markup = float(s.get("grid_markup_eur_kwh", 0.133))
     grid_components = {
         "afnametarief_ct":       float(s.get("grid_afname_ct",           5.75)),
         "bijzondere_accijns_ct": float(s.get("grid_accijns_ct",          5.03)),
