@@ -242,7 +242,15 @@ def build_plan_claude(
     min_soc_f     = float(s["min_reserve_soc"]) / 100.0
     max_soc_f     = float(s["max_soc"]) / 100.0
     max_charge_kw = float(s["max_charge_kw"])
-    markup        = float(s.get("grid_markup_eur_kwh", 0.12))
+    markup        = float(s.get("grid_markup_eur_kwh", 0.133))
+    grid_components = {
+        "afnametarief_ct":       float(s.get("grid_afname_ct",           5.75)),
+        "bijzondere_accijns_ct": float(s.get("grid_accijns_ct",          5.03)),
+        "gsc_ct":                float(s.get("grid_gsc_ct",              1.17)),
+        "wkk_ct":                float(s.get("grid_wkk_ct",              0.37)),
+        "energiebijdrage_ct":    float(s.get("grid_energiebijdrage_ct",  0.20)),
+        "btw_pct":               float(s.get("grid_btw_pct",             6.0)),
+    }
     tz_name       = s.get("timezone", "Europe/Brussels")
     tz            = ZoneInfo(tz_name)
     model         = s.get("claude_model", "claude-haiku-4-5-20251001")
@@ -368,6 +376,7 @@ def build_plan_claude(
             "rte":                  rte,
             "depreciation_eur_kwh": depr,
             "grid_markup_eur_kwh":  markup,
+            "grid_markup_components": grid_components,
             "breakeven_grid_charge_eur_kwh": breakeven,
         },
         "price_stats": {

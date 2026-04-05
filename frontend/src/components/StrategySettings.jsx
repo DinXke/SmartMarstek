@@ -8,7 +8,14 @@ const DEFAULTS = {
   max_soc:              95,
   max_charge_kw:        3.0,
   sell_back:            false,
-  grid_markup_eur_kwh:  0.12,
+  grid_markup_eur_kwh:  0.133,
+  // Nettarief componenten (ct/kWh excl. BTW) — referentie: Frank Energie factuur Limburg feb 2026
+  grid_afname_ct:           5.75,
+  grid_accijns_ct:          5.03,
+  grid_gsc_ct:              1.17,
+  grid_wkk_ct:              0.37,
+  grid_energiebijdrage_ct:  0.20,
+  grid_btw_pct:             6,
   manual_peak_hours:    "",
   history_days:         21,
   price_source:         "entsoe",
@@ -73,7 +80,19 @@ export default function StrategySettings() {
         min_reserve_soc:      parseInt(vals.min_reserve_soc),
         max_soc:              parseInt(vals.max_soc),
         max_charge_kw:        parseFloat(vals.max_charge_kw),
-        grid_markup_eur_kwh:  parseFloat(vals.grid_markup_eur_kwh),
+        grid_afname_ct:          parseFloat(vals.grid_afname_ct)          || 0,
+        grid_accijns_ct:         parseFloat(vals.grid_accijns_ct)         || 0,
+        grid_gsc_ct:             parseFloat(vals.grid_gsc_ct)             || 0,
+        grid_wkk_ct:             parseFloat(vals.grid_wkk_ct)             || 0,
+        grid_energiebijdrage_ct: parseFloat(vals.grid_energiebijdrage_ct) || 0,
+        grid_btw_pct:            parseFloat(vals.grid_btw_pct)            || 6,
+        grid_markup_eur_kwh: (
+          (parseFloat(vals.grid_afname_ct)          || 0) +
+          (parseFloat(vals.grid_accijns_ct)         || 0) +
+          (parseFloat(vals.grid_gsc_ct)             || 0) +
+          (parseFloat(vals.grid_wkk_ct)             || 0) +
+          (parseFloat(vals.grid_energiebijdrage_ct) || 0)
+        ) * (1 + (parseFloat(vals.grid_btw_pct) || 6) / 100) / 100,
         history_days:         parseInt(vals.history_days),
         manual_peak_hours:    vals.manual_peak_hours
           .split(",").map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => !isNaN(n)),
@@ -188,19 +207,80 @@ export default function StrategySettings() {
         )}
       </Row>
 
-      {/* Grid markup */}
-      <Row label="Nettarief + belasting (€/kWh)"
-        desc={vals.price_source === "frank"
-          ? "Bij Frank-prijzen: enkel distributie/transportkost (~5–7 ct/kWh). Belastingen zitten al in de Frank-prijs."
-          : "Vaste opslag bovenop de marktprijs: distributie, heffingen, btw (excl.). Typisch 10–15 ct/kWh."}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input className="form-input" type="number" step="0.005" min="0" max="0.50" style={{ width: 80 }}
-            value={vals.grid_markup_eur_kwh} onChange={(e) => set("grid_markup_eur_kwh", e.target.value)} />
-          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            ({Math.round(parseFloat(vals.grid_markup_eur_kwh || 0) * 100)} ct)
-          </span>
-        </div>
-      </Row>
+      {/* Grid markup — per component */}
+      {(() => {
+        const afname  = parseFloat(vals.grid_afname_ct)          || 0;
+        const accijns = parseFloat(vals.grid_accijns_ct)         || 0;
+        const gsc     = parseFloat(vals.grid_gsc_ct)             || 0;
+        const wkk     = parseFloat(vals.grid_wkk_ct)             || 0;
+        const eb      = parseFloat(vals.grid_energiebijdrage_ct) || 0;
+        const btw     = parseFloat(vals.grid_btw_pct)            || 6;
+        const totalExclBtw = afname + accijns + gsc + wkk + eb;
+        const totalInclBtw = totalExclBtw * (1 + btw / 100);
+        const compStyle = { display: "flex", alignItems: "center", gap: 6 };
+        const inp = (key, step = 0.01) => (
+          <div style={compStyle}>
+            <input className="form-input" type="number" step={step} min="0" max="30" style={{ width: 72 }}
+              value={vals[key]} onChange={(e) => set(key, e.target.value)} />
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>ct</span>
+          </div>
+        );
+        return (
+          <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }}>
+            <div className="settings-row-label" style={{ padding: "10px 0 4px", fontWeight: 600 }}>
+              Nettarieven &amp; belastingen
+            </div>
+            <div className="settings-row-desc" style={{ marginBottom: 8 }}>
+              Vaste opslag bovenop de marktprijs, per component (excl. BTW).
+              {vals.price_source === "frank"
+                ? " Frank-prijs bevat al energiebelasting/opslagen — vul hier enkel de nettarieven en accijnzen in."
+                : " Tel alle componenten op voor de volledige opslag bovenop ENTSO-E groothandelsprijs."}
+              {" "}Referentiewaarden: Frank Energie factuur Limburg feb 2026 (274 kWh).
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "2px 0" }}>
+              <Row label="Afnametarief / distributie"
+                desc="Distributie- en transportkost Fluvius. Limburg feb 2026: 5,75 ct/kWh">
+                {inp("grid_afname_ct")}
+              </Row>
+              <Row label="Bijzondere accijns"
+                desc="Federale energieaccijns. Limburg feb 2026: 5,03 ct/kWh">
+                {inp("grid_accijns_ct")}
+              </Row>
+              <Row label="Groenestroomcertificaten (GSC)"
+                desc="Bijdrage hernieuwbare energie. Limburg feb 2026: 1,17 ct/kWh">
+                {inp("grid_gsc_ct")}
+              </Row>
+              <Row label="WKK-certificaten"
+                desc="Warmtekrachtkoppeling-bijdrage. Limburg feb 2026: 0,37 ct/kWh">
+                {inp("grid_wkk_ct")}
+              </Row>
+              <Row label="Energiebijdrage"
+                desc="Federale energiebijdrage. Limburg feb 2026: 0,20 ct/kWh">
+                {inp("grid_energiebijdrage_ct")}
+              </Row>
+              <Row label="BTW (%)"
+                desc="Van toepassing op bovenstaande nettarieven (standaard 6%).">
+                <div style={compStyle}>
+                  <input className="form-input" type="number" step="1" min="0" max="21" style={{ width: 60 }}
+                    value={vals.grid_btw_pct} onChange={(e) => set("grid_btw_pct", e.target.value)} />
+                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>%</span>
+                </div>
+              </Row>
+            </div>
+            <div style={{
+              display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12,
+              padding: "8px 0 4px", borderTop: "1px dashed var(--border)", marginTop: 4,
+            }}>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                Totaal excl. BTW: <strong>{totalExclBtw.toFixed(2)} ct/kWh</strong>
+              </span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--accent)" }}>
+                Totaal incl. BTW: {totalInclBtw.toFixed(2)} ct/kWh
+              </span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* SOC limits */}
       <Row label="Min. reserve SOC (%)"
