@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.19.44] - 2026-04-05
+
+### Fixed
+- Winst dashboard: gebruikt nu de extern geconfigureerde InfluxDB (zelfde als
+  de rest van de app) i.p.v. de interne localhost:8086 die niet beschikbaar is
+- Winst dashboard: groupBy doorgaf dag-object i.p.v. datum-string aan
+  isoWeekLabel/monthLabel → week/maand labels toonden NaN
+- Winst dashboard: betere foutmelding bij geen data (vermeldt de drie
+  vereiste configuratiestappen)
+
 ## [1.19.43] - 2026-04-05
 
 ### Added

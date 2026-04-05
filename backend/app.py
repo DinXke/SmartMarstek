@@ -3431,6 +3431,86 @@ def set_automation():
 # Profit analysis: automation savings vs. anti-feed baseline
 # ---------------------------------------------------------------------------
 
+def _query_profit_day(date_str: str, tz_name: str) -> dict:
+    """
+    Query the user-configured external InfluxDB for hourly averages of
+    solar_w, net_w and house_w for a specific calendar date.
+    Returns {hour_int: {"solar_w": float, "net_w": float, "house_w": float}}.
+    Falls back to {} when InfluxDB is not configured or unreachable.
+    """
+    import pytz as _pytz
+    from datetime import datetime as _dt, timedelta as _td
+
+    influx_src = _load_influx_source()
+    conn       = _load_influx_conn()
+    url        = influx_src.get("url") or conn.get("url", "")
+    version    = influx_src.get("version") or conn.get("version", "v1")
+    database   = influx_src.get("database", "")
+    username   = conn.get("username", "")
+    password   = conn.get("password", "")
+    mappings   = influx_src.get("mappings", {})
+
+    if not url or not database:
+        log.debug("profit: external InfluxDB not configured")
+        return {}
+
+    tz_obj = _pytz.timezone(tz_name)
+    _d     = _dt.strptime(date_str, "%Y-%m-%d")
+    # Wide UTC window (±14 h) so we always capture the full local day
+    start  = (_d - _td(hours=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end    = (_d + _td(hours=38)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    result: dict[int, dict] = {}
+
+    for field_name in ("solar_w", "net_w", "house_w"):
+        mapping = mappings.get(field_name)
+        if not mapping:
+            continue
+        if isinstance(mapping, list):
+            mapping = mapping[0]
+
+        field   = mapping.get("field", "value")
+        meas    = mapping.get("measurement") or influx_src.get("measurement", "")
+        tag_key = mapping.get("tag_key", "")
+        tag_val = mapping.get("tag_value", "")
+        if not meas:
+            continue
+
+        where_parts = [f"time >= '{start}' AND time < '{end}'"]
+        if tag_key and tag_val:
+            where_parts.append(f'"{tag_key}" = \'{tag_val}\'')
+
+        q = (f'SELECT mean("{field}") AS val FROM "{meas}"'
+             f' WHERE {" AND ".join(where_parts)}'
+             f' GROUP BY time(1h) fill(null)')
+        try:
+            data = _influx_v1_query(url, username, password, q, db=database)
+            for res in data.get("results", []):
+                for series in res.get("series", []):
+                    for row in series.get("values", []):
+                        ts_raw, val = row[0], row[1]
+                        if val is None:
+                            continue
+                        try:
+                            dt_utc = _dt.strptime(ts_raw[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                                tzinfo=_pytz.utc)
+                            dt_loc = dt_utc.astimezone(tz_obj)
+                            if dt_loc.strftime("%Y-%m-%d") == date_str:
+                                h = dt_loc.hour
+                                result.setdefault(h, {})[field_name] = float(val)
+                        except Exception:
+                            pass
+        except Exception as exc:
+            log.debug("profit: influx query %s/%s %s: %s", field_name, meas, date_str, exc)
+
+    # If net_w not mapped but solar_w and house_w are: approximate from those two
+    for h, hd in result.items():
+        if "net_w" not in hd and "solar_w" in hd and "house_w" in hd:
+            hd["net_w"] = hd["house_w"] - hd["solar_w"]   # positive = importing
+
+    return result
+
+
 @app.route("/api/profit")
 def get_profit_analysis():
     """
@@ -3441,9 +3521,6 @@ def get_profit_analysis():
     Query params:
       days=30  – how many past days to analyse (max 90)
     """
-    import pytz as _pytz
-    from influx_writer import query_day_actuals
-
     days_param = min(max(int(request.args.get("days", 30)), 1), 90)
     s          = load_strategy_settings()
     tz_name    = s.get("timezone", "Europe/Brussels")
@@ -3514,8 +3591,8 @@ def get_profit_analysis():
         if len(price_by_hour) < 12:
             continue   # not enough price data for this day
 
-        # ── 2. Fetch actual measurements from InfluxDB ────────────────────
-        actuals = query_day_actuals(date_str, tz_name)
+        # ── 2. Fetch actual measurements from external InfluxDB ───────────
+        actuals = _query_profit_day(date_str, tz_name)
         if not actuals or len(actuals) < 4:
             continue   # no sensor data for this day
 
@@ -3523,10 +3600,10 @@ def get_profit_analysis():
         cost_with = 0.0
         cost_no   = 0.0
 
-        # Starting SOC for "no automation" simulation: use first available hour
-        first_h    = min(actuals.keys())
-        bat_kwh    = ((actuals[first_h].get("bat_soc") or 50.0) / 100.0) * cap_kwh
-        bat_kwh    = max(bat_min_kwh, min(bat_max_kwh, bat_kwh))
+        # Starting SOC for "no automation" simulation: assume 50% (bat_soc
+        # not available from external InfluxDB without a dedicated mapping)
+        bat_kwh = 0.5 * cap_kwh
+        bat_kwh = max(bat_min_kwh, min(bat_max_kwh, bat_kwh))
 
         hours_detail = []
 
@@ -3591,8 +3668,9 @@ def get_profit_analysis():
             "days":    [],
             "summary": None,
             "warning": (
-                "Geen data beschikbaar. Controleer of InfluxDB actieve sensordata bevat "
-                "en of de prijsbron (ENTSO-E / Frank) correct geconfigureerd is."
+                "Geen data beschikbaar. Controleer: (1) InfluxDB URL + database in Instellingen, "
+                "(2) InfluxDB slotmapping voor solar_w / net_w / house_w, "
+                "(3) prijsbron (ENTSO-E API-sleutel of Frank Energie login)."
             ),
         })
 

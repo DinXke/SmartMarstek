@@ -619,8 +619,8 @@ export default function ProfitPage() {
   const selectedDayData = selDay != null ? days[selDay] : null;
 
   // Weekly / monthly groupings
-  const weekGroups  = days.length >= 7  ? groupBy(days, d => isoWeekLabel(d)) : [];
-  const monthGroups = days.length >= 20 ? groupBy(days, d => monthLabel(d))   : [];
+  const weekGroups  = days.length >= 7  ? groupBy(days, d => isoWeekLabel(d.date)) : [];
+  const monthGroups = days.length >= 20 ? groupBy(days, d => monthLabel(d.date))   : [];
 
   return (
     <div style={{ maxWidth: 900, margin: "0 auto", padding: "12px 16px" }}>
