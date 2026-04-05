@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.45] - 2026-04-05
+
+### Fixed
+- Winst dashboard: net_w mapping respecteert nu het "omk." vinkje uit de
+  InfluxDB-instellingen — zet dit aan als positief in jouw InfluxDB teruglevering
+  betekent (i.p.v. de standaard positief=import conventie)
+
 ## [1.19.44] - 2026-04-05
 
 ### Fixed

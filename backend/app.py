@@ -3473,6 +3473,9 @@ def _query_profit_day(date_str: str, tz_name: str) -> dict:
         meas    = mapping.get("measurement") or influx_src.get("measurement", "")
         tag_key = mapping.get("tag_key", "")
         tag_val = mapping.get("tag_value", "")
+        # "invert": true flips the sign — use when positive in InfluxDB means
+        # export/teruglevering instead of the standard positive=import convention.
+        sign    = -1.0 if mapping.get("invert", False) else 1.0
         if not meas:
             continue
 
@@ -3497,7 +3500,7 @@ def _query_profit_day(date_str: str, tz_name: str) -> dict:
                             dt_loc = dt_utc.astimezone(tz_obj)
                             if dt_loc.strftime("%Y-%m-%d") == date_str:
                                 h = dt_loc.hour
-                                result.setdefault(h, {})[field_name] = float(val)
+                                result.setdefault(h, {})[field_name] = sign * float(val)
                         except Exception:
                             pass
         except Exception as exc:
