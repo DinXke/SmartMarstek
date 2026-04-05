@@ -207,7 +207,7 @@ function SlotGroupList({ slots, isToday, nowHour }) {
     <div className="strat-detail-list">
       {groups.map((g, i) => {
         const containsNow = isToday && g.slots.some((s) => s.hour === nowHour && !s.is_past);
-        const defaultOpen = containsNow || g.action !== "neutral";
+        const defaultOpen = containsNow;
         return <SlotGroup key={i} group={g} defaultOpen={defaultOpen} />;
       })}
     </div>
