@@ -3473,7 +3473,7 @@ def get_profit_analysis():
     today     = datetime.now(tz).date()
     days_data = []
 
-    for d_offset in range(days_param, 0, -1):
+    for d_offset in range(days_param, -1, -1):  # include today (offset=0)
         day      = today - timedelta(days=d_offset)
         date_str = day.isoformat()
 

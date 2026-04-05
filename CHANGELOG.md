@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.19.43] - 2026-04-05
+
+### Added
+- Winst dashboard: sub-tab "📅 Dag" toont vandaag per uur als standaard weergave;
+  ◀ ▶ navigatie om dag voor/achteruit te bladeren
+- Per-uur staafgrafiek (gegroepeerd: rood=zonder auto, groen=met auto) met
+  hover-tooltip (prijs, zon, verbruik, net, besparing)
+- Dagsamenvattingspills boven de uurbalken (kost zonder/met auto + besparing)
+- Backend `/api/profit` geeft nu ook vandaag mee (gedeeltelijke data = OK)
+
+### Fixed
+- Winst overzicht toont beschikbare data ook als de gekozen periode niet
+  volledig gevuld is (geen foutmelding bij minder data dan gevraagd)
+
 ## [1.19.42] - 2026-04-05
 
 ### Added
