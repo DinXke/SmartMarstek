@@ -1587,7 +1587,7 @@ def get_forecast_actuals():
                 result[slot] = sum(vals) / len(vals)
         except Exception as exc:
             log.warning("forecast/actuals ha error: %s", exc)
-            return jsonify({"watts": {}, "warning": f"HA history niet bereikbaar: {exc}"})
+            return jsonify({"error": f"HA history: {exc}"}), 502
 
     elif src == "flow":
         # Use solar_power entries from flow_cfg (same sources as the live dashboard).

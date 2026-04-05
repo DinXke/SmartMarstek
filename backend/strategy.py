@@ -66,6 +66,10 @@ DEFAULT_SETTINGS = {
     # 0.30 = best upcoming price must be ≥30% above current price (AND above p75).
     # Lower = more aggressive saving; higher = only save for very large spreads.
     "save_price_factor":    0.30,
+    # Minimum net spread (€/kWh) between effective charge cost and best future
+    # price to trigger grid charging.  5ct = charge from grid when you gain ≥5ct
+    # per stored kWh after efficiency + depreciation losses.
+    "min_charge_spread_eur_kwh": 0.05,
     # Strategy engine: "rule_based" (default) or "claude" (uses Anthropic API)
     "strategy_mode":        "rule_based",
     # Anthropic API key (only used when strategy_mode = "claude")
@@ -346,9 +350,12 @@ def build_plan(
             # NOTE: discharge depreciation is NOT subtracted here — it applies
             # to the discharge decision, not the charge decision.  The correct
             # profitability check is simply: charge_cost < future_savings.
-            eff_charge_cost = buy_price / rte + depr   # ct/kWh stored
-            can_profit = eff_charge_cost < max_future  # worth pre-charging?
-            is_cheap   = buy_price < p25 * 1.05
+            eff_charge_cost = buy_price / rte + depr   # €/kWh stored
+            charge_spread   = max_future - eff_charge_cost   # net gain/kWh
+            min_spread      = s.get("min_charge_spread_eur_kwh", 0.05)
+            is_cheap        = buy_price < p25 * 1.05
+            # Grid charge when: price in cheapest quartile, OR spread large enough
+            grid_charge_ok  = charge_spread >= min_spread or (is_cheap and charge_spread > 0)
 
             if is_peak_hour and bat_kwh > bat_min + 0.2 and buy_price >= price_median:
                 # Peak hour AND price is at or above the day's median.
@@ -368,14 +375,14 @@ def build_plan(
                         action = NEUTRAL
                         reason = "Batterij te leeg voor ontladen"
 
-            elif is_cheap and can_profit and bat_kwh < bat_max - 0.2:
-                # Cheap grid electricity + profitable vs future price → charge
+            elif grid_charge_ok and bat_kwh < bat_max - 0.2:
+                # Spread large enough → charge from grid now to discharge later
                 can_add_kwh  = bat_max - bat_kwh
                 charge_kwh   = min(can_add_kwh / rte, max_charge_kw)
                 bat_kwh     += charge_kwh * rte
                 action = GRID_CHARGE
-                reason = (f"Goedkoop ({buy_price*100:.1f}ct/kWh) → "
-                          f"piek later {max_future*100:.1f}ct")
+                reason = (f"Spread {charge_spread*100:.1f}ct/kWh "
+                          f"(koop {buy_price*100:.1f}ct → piek {max_future*100:.1f}ct)")
 
             elif buy_price > p75 and bat_kwh > bat_min + 0.2:
                 # Expensive slot: use battery — but save for even better hours

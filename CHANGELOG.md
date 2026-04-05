@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.19.38] - 2026-04-05
+
+### Fixed
+- Strategie netwerk laden: trigger nu ook als de spread (netto winst per kWh
+  na efficiency + slijtage) groter is dan de drempel (standaard 5ct/kWh),
+  ook al is de prijs niet absoluut goedkoop (< p25). Nieuwe instelling:
+  `min_charge_spread_eur_kwh` (standaard 0.05 = 5ct)
+- Werkelijke opbrengst 502: foutbericht bevat nu het echte HA-fout detail
+
 ## [1.18.0] - 2026-04-02
 
 ### Changed
