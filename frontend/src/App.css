@@ -2140,8 +2140,15 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 280px;
-  overflow-y: auto;
+  max-height: none;   /* no cap — groups collapse themselves */
+  overflow-y: visible;
+}
+
+.strat-group-header:hover {
+  background: var(--bg-card-hover) !important;
+}
+.strat-group-header .strat-detail-time {
+  min-width: 90px;   /* wider for "HH:MM–HH:00" */
 }
 
 .strat-detail-row {

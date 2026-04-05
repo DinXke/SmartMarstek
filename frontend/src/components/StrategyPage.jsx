@@ -126,6 +126,94 @@ function HourBar({ slot, maxPrice, maxSolar, maxCons, isNow }) {
   );
 }
 
+// ── Group consecutive slots by action, collapsible ───────────────────────
+
+function SlotRow({ slot }) {
+  const ac    = ACTION_COLOR[slot.action] || ACTION_COLOR.neutral;
+  const isNeu = slot.action === "neutral";
+  return (
+    <div className="strat-detail-row"
+      style={{ borderLeft: `3px solid ${ac.border}`, opacity: isNeu ? 0.45 : 1 }}>
+      <span className="strat-detail-time">{fmtHour(slot.time)}</span>
+      <span className="strat-detail-icon">{ac.icon}</span>
+      <span className="strat-detail-action" style={{ color: ac.border }}>{ac.label}</span>
+      <span className="strat-detail-reason">{slot.reason}</span>
+      <span className="strat-detail-soc">
+        {Math.round(slot.soc_start)}% → {Math.round(slot.soc_end)}%
+      </span>
+      {slot.price_eur_kwh != null && (
+        <span className="strat-detail-price">{fmtPrice(slot.price_eur_kwh)}</span>
+      )}
+    </div>
+  );
+}
+
+function SlotGroup({ group, defaultOpen }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const ac    = ACTION_COLOR[group.action] || ACTION_COLOR.neutral;
+  const isNeu = group.action === "neutral";
+  const first = group.slots[0];
+  const last  = group.slots[group.slots.length - 1];
+
+  // Single slot: render directly without toggle
+  if (group.slots.length === 1) return <SlotRow slot={first} />;
+
+  return (
+    <div>
+      {/* Group header */}
+      <div
+        className="strat-detail-row strat-group-header"
+        style={{ borderLeft: `3px solid ${ac.border}`, opacity: isNeu ? 0.6 : 1, cursor: "pointer" }}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="strat-detail-time">
+          {fmtHour(first.time)}–{String((last.hour + 1) % 24).padStart(2, "0")}:00
+        </span>
+        <span className="strat-detail-icon">{ac.icon}</span>
+        <span className="strat-detail-action" style={{ color: ac.border }}>
+          {ac.label}
+          <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>
+            ({group.slots.length}u)
+          </span>
+        </span>
+        <span className="strat-detail-reason" style={{ opacity: 0.6 }}>
+          {Math.round(first.soc_start)}% → {Math.round(last.soc_end)}%
+        </span>
+        <span style={{ marginLeft: "auto", fontSize: 13, color: "var(--text-muted)", paddingRight: 4 }}>
+          {open ? "▲" : "▼"}
+        </span>
+      </div>
+      {/* Expanded rows */}
+      {open && group.slots.map((s) => <SlotRow key={s.time} slot={s} />)}
+    </div>
+  );
+}
+
+function SlotGroupList({ slots, isToday, nowHour }) {
+  // Build groups of consecutive same-action slots
+  const groups = [];
+  for (const slot of slots) {
+    const last = groups[groups.length - 1];
+    if (last && last.action === slot.action) {
+      last.slots.push(slot);
+    } else {
+      groups.push({ action: slot.action, slots: [slot] });
+    }
+  }
+
+  // A group is open by default if it contains the current hour, or if it's
+  // a non-neutral action (interesting to see)
+  return (
+    <div className="strat-detail-list">
+      {groups.map((g, i) => {
+        const containsNow = isToday && g.slots.some((s) => s.hour === nowHour && !s.is_past);
+        const defaultOpen = containsNow || g.action !== "neutral";
+        return <SlotGroup key={i} group={g} defaultOpen={defaultOpen} />;
+      })}
+    </div>
+  );
+}
+
 function DayChart({ title, slots, isToday }) {
   if (!slots || !slots.length) return (
     <div className="strat-day-panel">
@@ -201,30 +289,7 @@ function DayChart({ title, slots, isToday }) {
       </div>
 
       {slots.length > 0 && (
-        <div className="strat-detail-list">
-          {slots.map((slot) => {
-            const ac      = ACTION_COLOR[slot.action] || ACTION_COLOR.neutral;
-            const isNeu   = slot.action === "neutral";
-            return (
-              <div key={slot.time} className="strat-detail-row"
-                style={{
-                  borderLeft: `3px solid ${ac.border}`,
-                  opacity: isNeu ? 0.45 : 1,
-                }}>
-                <span className="strat-detail-time">{fmtHour(slot.time)}</span>
-                <span className="strat-detail-icon">{ac.icon}</span>
-                <span className="strat-detail-action" style={{ color: ac.border }}>{ac.label}</span>
-                <span className="strat-detail-reason">{slot.reason}</span>
-                <span className="strat-detail-soc">
-                  {Math.round(slot.soc_start)}% → {Math.round(slot.soc_end)}%
-                </span>
-                {slot.price_eur_kwh != null && (
-                  <span className="strat-detail-price">{fmtPrice(slot.price_eur_kwh)}</span>
-                )}
-              </div>
-            );
-          })}
-        </div>
+        <SlotGroupList slots={slots} isToday={isToday} nowHour={nowHour} />
       )}
     </div>
   );
