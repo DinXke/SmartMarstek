@@ -25,6 +25,7 @@ export default function ForecastSettings() {
   const [error,      setError]      = useState(null);
 
   // ── Actual solar source ──────────────────────────────────────────────────
+  const [updateInterval, setUpdateInterval] = useState(900);       // seconds
   const [actualSource,   setActualSource]   = useState("none");   // "none"|"influx"|"ha"
   const [actualEntityId, setActualEntityId] = useState("");
   const [haEntities,     setHaEntities]     = useState([]);
@@ -47,6 +48,7 @@ export default function ForecastSettings() {
         if (d.lat) setLat(String(d.lat));
         if (d.lon) setLon(String(d.lon));
         if (d.strings && d.strings.length) setStrings(d.strings);
+      if (d.update_interval) setUpdateInterval(d.update_interval);
       })
       .catch(() => {});
     fetch("api/forecast/actual-source")
@@ -79,6 +81,7 @@ export default function ForecastSettings() {
           dec: parseFloat(s.dec) || 35,
         })),
       };
+      body.update_interval = parseInt(updateInterval);
       if (apiKey.trim()) body.api_key = apiKey.trim();
       const r = await fetch("api/forecast/settings", {
         method: "POST",
@@ -185,6 +188,23 @@ export default function ForecastSettings() {
           </div>
         ))}
         <button className="btn btn-ghost btn-sm" onClick={addString}>+ String toevoegen</button>
+      </div>
+
+      {/* Update interval */}
+      <div className="settings-row">
+        <div>
+          <div className="settings-row-label">Verversingsfrequentie</div>
+          <div className="settings-row-desc">Hoe vaak de voorspelling opgehaald wordt van forecast.solar.</div>
+        </div>
+        <select className="form-input" value={updateInterval} onChange={(e) => setUpdateInterval(e.target.value)}
+          style={{ width: 160 }}>
+          <option value={900}>15 minuten</option>
+          <option value={1800}>30 minuten</option>
+          <option value={3600}>1 uur</option>
+          <option value={14400}>4 uur</option>
+          <option value={43200}>12 uur</option>
+          <option value={86400}>24 uur</option>
+        </select>
       </div>
 
       {/* Actual solar source */}

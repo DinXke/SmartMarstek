@@ -1298,9 +1298,16 @@ def poll_ha_sensors():
 
 FORECAST_SETTINGS_FILE = os.path.join(BASE_DIR, "forecast_settings.json")
 _forecast_cache: dict = {"data": None, "ts": 0}
-FORECAST_CACHE_TTL    = 900    # 15 min in-memory TTL (Personal Pro = 1 req/15min)
 FORECAST_CACHE_FILE   = os.path.join(DATA_DIR, "forecast_cache.json")
-FORECAST_DISK_TTL     = 900    # also 15 min on disk — survives add-on restarts
+_FORECAST_TTL_DEFAULT = 900    # 15 min default (Personal Pro = 1 req/15min)
+
+
+def _forecast_cache_ttl() -> int:
+    """Return configured update interval in seconds, falling back to 15 min."""
+    try:
+        return int(_forecast_settings().get("update_interval") or _FORECAST_TTL_DEFAULT)
+    except Exception:
+        return _FORECAST_TTL_DEFAULT
 
 
 def _load_forecast_disk_cache() -> None:
@@ -1308,7 +1315,7 @@ def _load_forecast_disk_cache() -> None:
     try:
         with open(FORECAST_CACHE_FILE, "r", encoding="utf-8") as f:
             saved = json.load(f)
-        if time.time() - saved.get("ts", 0) < FORECAST_DISK_TTL:
+        if time.time() - saved.get("ts", 0) < _forecast_cache_ttl():
             _forecast_cache["data"] = saved["data"]
             _forecast_cache["ts"]   = saved["ts"]
             log.info("forecast: restored from disk cache (age=%.0fs)",
@@ -1411,7 +1418,7 @@ def get_forecast_estimate():
         return jsonify({"error": "Locatie niet ingesteld."}), 400
 
     now = time.time()
-    if _forecast_cache["data"] and (now - _forecast_cache["ts"]) < FORECAST_CACHE_TTL:
+    if _forecast_cache["data"] and (now - _forecast_cache["ts"]) < _forecast_cache_ttl():
         return jsonify(_forecast_cache["data"])
 
     result = _fetch_forecast(s)
