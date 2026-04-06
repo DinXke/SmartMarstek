@@ -3347,6 +3347,73 @@ def _solar_overproduction_w() -> float | None:
     return None
 
 
+def _live_soc() -> float | None:
+    """Read the most recent SOC from last_soc.json (updated every ~30s by the data collector)."""
+    try:
+        _soc_file = os.path.join(DATA_DIR, "last_soc.json")
+        with open(_soc_file, encoding="utf-8") as _f:
+            _sc = json.load(_f)
+        if time.time() - _sc.get("ts", 0) < 300:   # accept if < 5 min old
+            return float(_sc["soc"])
+    except Exception:
+        pass
+    return None
+
+
+def _check_solar_deficit_save() -> str | None:
+    """
+    Returns an override-reason string when solar production is significantly
+    below the hourly forecast AND a discharge slot is coming up within 14 h.
+    Used to switch solar_charge / neutral → save so the battery SOC is
+    preserved for the discharge instead of draining away in neutral mode.
+    Returns None when no override is warranted.
+    """
+    slots = _plan_cache.get("slots", [])
+    if not slots:
+        return None
+
+    tz_name = _entsoe_settings().get("timezone", "Europe/Brussels")
+    now_h = datetime.now(ZoneInfo(tz_name)).hour
+
+    current_slot = next((s for s in slots if s.get("hour") == now_h), None)
+    if current_slot is None:
+        return None
+
+    # Only act when this hour had a meaningful solar forecast
+    forecast_wh = float(current_slot.get("solar_wh", 0) or 0)
+    if forecast_wh < 300:
+        return None
+
+    # Actual live solar production (W ≈ Wh for the current hour)
+    live = _read_live_flow_slots("solar_power")
+    actual_w = live.get("solar_power")
+    if actual_w is None:
+        return None   # no solar sensor configured – can't judge
+
+    # Trigger when actual is < 25 % of forecast (≥ 75 % shortfall)
+    if actual_w >= forecast_wh * 0.25:
+        return None
+
+    # Is there a discharge slot in the next 14 hours?
+    has_upcoming_discharge = any(
+        s.get("action") == "discharge"
+        for s in slots
+        if 0 < ((s.get("hour", 0) - now_h) % 24) <= 14
+    )
+    if not has_upcoming_discharge:
+        return None
+
+    # No point saving when battery is already near-full
+    soc = _live_soc()
+    if soc is None or soc >= 85:
+        return None
+
+    return (
+        f"⛅ Zontekort: {actual_w:.0f}W actueel vs "
+        f"{forecast_wh:.0f}Wh voorspeld – SOC {soc:.0f}% bewaren voor ontlading"
+    )
+
+
 def _load_automation() -> dict:
     try:
         with open(AUTOMATION_FILE, "r", encoding="utf-8") as f:
@@ -3428,6 +3495,17 @@ def _automation_tick() -> None:
             effective_action = "neutral"
             override_reason  = f"☀️ Zonne-overproductie ({surplus_w:.0f} W) – anti-feed actief"
             log.info("Automation: save→neutral override (solar surplus=%.0fW)", surplus_w)
+
+    # ── Solar-deficit failsafe ────────────────────────────────────────────────
+    # When the plan expected solar production (solar_charge / neutral) but the
+    # sun isn't delivering, switch to save so the current SOC is preserved for
+    # any discharge slot later in the day.
+    if effective_action in ("solar_charge", "neutral") and override_reason is None:
+        deficit_reason = _check_solar_deficit_save()
+        if deficit_reason:
+            effective_action = "save"
+            override_reason = deficit_reason
+            log.info("Automation: solar-deficit failsafe → save (%s)", deficit_reason)
 
     prev_action = auto.get("last_action")
     if effective_action == prev_action:

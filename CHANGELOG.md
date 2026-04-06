@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.19.69] - 2026-04-07
+
+### Added
+- **Zontekort-failsafe in automatisering**: wanneer de automatisering een `solar_charge` of
+  `neutral` slot uitvoert maar de zon beduidend minder levert dan voorspeld (< 25% van de
+  prognose), én er binnen 14 uur een `discharge`-slot gepland staat, schakelt de automatisering
+  automatisch over naar `save`. Zo wordt de huidige SOC bewaard voor de ontlading in plaats van
+  stilletjes weg te lekken in neutral-modus terwijl de batterij leeg is.
+- Nieuwe helper `_live_soc()` — leest `last_soc.json` (< 5 min oud) voor gebruik buiten
+  `_compute_forward_plan()`.
+- Nieuwe helper `_check_solar_deficit_save()` — evalueert zontekort-criteria en geeft een
+  leesbare override-reden terug voor de UI.
+
 ## [1.19.68] - 2026-04-06
 
 ### Fixed
