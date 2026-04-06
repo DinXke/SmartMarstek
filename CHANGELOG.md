@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.19.47] - 2026-04-06
+
+### Added
+- PV-limiter: aanstuurmethode toggle — kies tussen standaard HA-entiteit
+  (`number.set_value`) of aangepaste HA-service (bijv. SMA Devices Plus)
+- Service-modus: configureer service (`domein.service`) + parameter naam
+  (bijv. `Active Power Limitation`) — app stuurt `{parameter, value}` naar de service
+- Preview in UI toont de exacte service-aanroep die verstuurd wordt
+
 ## [1.19.46] - 2026-04-06
 
 ### Added
