@@ -3531,13 +3531,12 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
 
 
 def _pv_limiter_tick() -> None:
-    """Fast tick (every 15 s) that only handles the PV power limiter."""
-    auto = _load_automation()
-    if not auto.get("enabled"):
-        return
+    """Fast tick (every 15 s) that only handles the PV power limiter.
+    Runs independently of the battery automation toggle."""
     s = load_strategy_settings()
     if not s.get("pv_limiter_enabled"):
         return
+    auto = _load_automation()
     _apply_pv_limiter(s, auto)
     _save_automation(auto)
 
