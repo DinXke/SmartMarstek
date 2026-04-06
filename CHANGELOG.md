@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.19.53] - 2026-04-06
+
+### Changed
+- PV-limiter gebruikt nu live SOC uit `last_soc.json` (max 5 min oud)
+  i.p.v. de geschatte planwaarde — correctere beslissing over "vol/niet vol"
+- Batterij niet vol → target = huis + max laadvermogen + marge
+- Batterij vol (SOC ≥ max_soc−2%) → target = huis + marge
+- Vloer altijd ≥ huisverbruik zodat de limiter nooit grid-import veroorzaakt
+- PV-limiter tick versneld van 15s naar 5s
+
+## [1.19.52] - 2026-04-06
+
+### Added
+- PV-limiter diagnostische logging: debug bij elke tick, warning bij mislukte HA-aanroep
+
 ## [1.19.51] - 2026-04-06
 
 ### Fixed
