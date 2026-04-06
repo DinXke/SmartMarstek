@@ -386,12 +386,12 @@ function IsoNode({ cx, cy, hw, nc, iconEl, label, val, valColor, sub }) {
       {/* Label below diamond */}
       <text x={cx} y={s + 13}
         textAnchor="middle" dominantBaseline="middle"
-        fill="#94a3b8" fontSize={8.5} letterSpacing="0.6"
+        fill="var(--text-muted)" fontSize={8.5} letterSpacing="0.6"
         fontFamily="Inter,system-ui,sans-serif">{label}</text>
       {sub && (
         <text x={cx} y={s + 24}
           textAnchor="middle" dominantBaseline="middle"
-          fill="#64748b" fontSize={7.5}
+          fill="var(--text-dim)" fontSize={7.5}
           fontFamily="'Courier New',Courier,monospace">{sub}</text>
       )}
     </g>
@@ -403,7 +403,7 @@ function FlowLine({ x1, y1, x2, y2, color, active, reverse, power, labelText }) 
   if (!active) {
     return (
       <line x1={x1} y1={y1} x2={x2} y2={y2}
-        stroke="#1a2540" strokeWidth={2.5} strokeLinecap="round" />
+        stroke="var(--border)" strokeWidth={2.5} strokeLinecap="round" />
     );
   }
   const dx = x2 - x1, dy = y2 - y1;
@@ -417,7 +417,7 @@ function FlowLine({ x1, y1, x2, y2, color, active, reverse, power, labelText }) 
     <g>
       {/* Shadow track */}
       <line x1={x1} y1={y1} x2={x2} y2={y2}
-        stroke="#0f172a" strokeWidth={4} strokeLinecap="round" />
+        stroke="var(--bg-card)" strokeWidth={4} strokeLinecap="round" />
       <g filter="url(#em-glow)">
         {/* Animated dashes */}
         <line x1={x1} y1={y1} x2={x2} y2={y2}
@@ -579,11 +579,11 @@ export default function EnergyMap({ batteries = [], phaseVoltages, acVoltage }) 
   // ── Flow colors & directions ──────────────────────────────────────────────
   const netActive = netDisplayPower != null && Math.abs(netDisplayPower) > 5;
   const netToGrid = (netDisplayPower ?? 0) > 0;
-  const netColor  = netActive ? (netToGrid ? "#22c55e" : "#ef4444") : "#1e293b";
+  const netColor  = netActive ? (netToGrid ? "#22c55e" : "#ef4444") : "var(--border)";
 
   const batActive = batDisplayPower != null && Math.abs(batDisplayPower) > 5;
   const batDisch  = (batDisplayPower ?? 0) > 0;
-  const batColor  = batActive ? (batDisch ? "#f59e0b" : "#3b82f6") : "#1e293b";
+  const batColor  = batActive ? (batDisch ? "#f59e0b" : "#3b82f6") : "var(--border)";
 
   const solarActive = solarPower != null && solarPower > 10;
   const evActive    = evPower != null && evPower > 10;
@@ -628,9 +628,8 @@ export default function EnergyMap({ batteries = [], phaseVoltages, acVoltage }) 
         </defs>
 
         {/* Background */}
-        <rect width={W} height={H} fill="#080d18" />
+        <rect width={W} height={H} fill="var(--bg-card)" />
         <rect width={W} height={H} fill="url(#iso-grid)" />
-        <rect width={W} height={H} fill="url(#edge-fade)" />
 
         {/* ── Flow lines (behind nodes) ── */}
         <FlowLine x1={gCx} y1={gCy} x2={hCx} y2={hCy}
@@ -729,7 +728,7 @@ export default function EnergyMap({ batteries = [], phaseVoltages, acVoltage }) 
             iconEl={<EVIcon cx={EV.cx} cy={EV.cy} hw={EV.hw} />}
             label="EV LADER"
             val={evPower != null ? fmt(evPower) : "—"}
-            valColor={evActive ? C.ev.b : "#475569"}
+            valColor={evActive ? C.ev.b : "var(--text-muted)"}
           />
         )}
 
@@ -745,7 +744,7 @@ export default function EnergyMap({ batteries = [], phaseVoltages, acVoltage }) 
           const mx = (gCx + hCx) / 2 + 8, my = (gCy + hCy) / 2 + 14;
           return (
             <text x={mx} y={my} textAnchor="middle"
-              fill="#475569" fontSize={7.5}
+              fill="var(--text-muted)" fontSize={7.5}
               fontFamily="'Courier New',Courier,monospace">{vStr}</text>
           );
         })()}

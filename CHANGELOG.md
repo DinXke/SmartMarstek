@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.19.57] - 2026-04-06
+
+### Fixed
+- Live vermogensstroom (EnergyMap): achtergrond gebruikt nu `var(--bg-card)` i.p.v.
+  hardgecodeerd donker `#080d18` — thema-bewust in licht én donker thema
+- Inactieve stroombanen en node-labels gebruiken nu CSS-variabelen
+  (`--border`, `--text-muted`, `--text-dim`) i.p.v. hardgecodeerde donkere kleuren
+- Donkere vignet-overlay verwijderd (was altijd zichtbaar in licht thema)
+
 ## [1.19.56] - 2026-04-06
 
 ### Fixed
