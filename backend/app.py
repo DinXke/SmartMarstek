@@ -3521,7 +3521,9 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
                     continue
 
     if price is None:
-        return  # no price data at all, don't touch the limiter
+        log.debug("PV limiter: price=None (plan_slots=%d, price_cache_keys=%s, hour=%d)",
+                  len(slots), list(_price_cache.keys()), now_local.hour)
+        return
 
     if price < threshold:
         # Curtail PV to exactly what is needed internally (house ± battery) + margin.
@@ -3554,6 +3556,8 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
     if last_w is not None and abs(last_w - target_w) < 50:
         return
 
+    log.debug("PV limiter: target=%dW price=%.4f threshold=%.4f action=%s → calling HA",
+              target_w, price, threshold, slot_action)
     ok = _pv_send(s, entity, use_service, svc_str, target_w)
     if ok:
         auto["pv_limiter_last_w"] = target_w
@@ -3561,6 +3565,8 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
                  target_w, price, cons_w,
                  int(float(s.get("max_charge_kw", 3.0)) * 1000) if price < threshold else 0,
                  threshold)
+    else:
+        log.warning("PV limiter: HA service call failed (entity=%s service=%s)", entity, svc_str)
 
 
 def _pv_limiter_tick() -> None:
@@ -3568,7 +3574,10 @@ def _pv_limiter_tick() -> None:
     Runs independently of the battery automation toggle."""
     s = load_strategy_settings()
     if not s.get("pv_limiter_enabled"):
+        log.debug("PV limiter tick: disabled in settings")
         return
+    log.debug("PV limiter tick: enabled, entity=%s use_service=%s service=%s",
+              s.get("pv_limiter_entity"), s.get("pv_limiter_use_service"), s.get("pv_limiter_service"))
     auto = _load_automation()
     _apply_pv_limiter(s, auto)
     _save_automation(auto)
