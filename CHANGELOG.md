@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.51] - 2026-04-06
+
+### Fixed
+- PV-limiter werkte niet direct na herstart: `_price_cache` was leeg,
+  waardoor de limiter tot 60s wachtte op de automation-tick voor prijsdata.
+  Nu worden bij opstarten direct de Frank/ENTSO-E prijzen opgehaald in een
+  achtergrondthread, zodat de limiter al na 15s actief kan zijn.
+
 ## [1.19.50] - 2026-04-06
 
 ### Fixed
