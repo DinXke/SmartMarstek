@@ -1139,6 +1139,30 @@ def _ha_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
+def _ha_call_service(domain: str, service: str, data: dict) -> bool:
+    """Call a HA service (e.g. number.set_value) via the effective HA connection."""
+    s = _ha_effective_settings()
+    if not s.get("url") or not s.get("token"):
+        log.debug("_ha_call_service: HA not configured")
+        return False
+    try:
+        r = _req.post(
+            f"{s['url']}/api/services/{domain}/{service}",
+            headers=_ha_headers(s["token"]),
+            json=data,
+            timeout=5,
+            verify=False,
+        )
+        if r.status_code in (200, 201):
+            log.info("HA service %s/%s OK  data=%s", domain, service, data)
+            return True
+        log.warning("HA service %s/%s → HTTP %d: %s", domain, service, r.status_code, r.text[:200])
+        return False
+    except Exception as exc:
+        log.warning("HA service %s/%s failed: %s", domain, service, exc)
+        return False
+
+
 @app.route("/api/ha/settings", methods=["GET"])
 def get_ha_settings():
     s = _ha_settings()
@@ -1789,7 +1813,7 @@ def get_strategy_settings():
     return jsonify(load_strategy_settings())
 
 
-@app.route("/api/strategy/settings", methods=["POST"])
+@app.route("/api/strategy/settings", methods=["POST", "PATCH"])
 def post_strategy_settings():
     body = request.get_json(force=True) or {}
     return jsonify(save_strategy_settings(body))
@@ -3384,6 +3408,102 @@ def _automation_tick() -> None:
     auto["planned_action"] = action             # what the strategy intended
     auto["override_reason"] = override_reason   # non-None when override active
     auto["last_applied"]   = datetime.now(timezone.utc).isoformat()
+
+    # ── PV power limiter (e.g. SMA Sunny Boy via HA) ─────────────────────────
+    # At negative/very cheap prices: curtail PV to avoid costly export.
+    # At negative prices you also want to grid_charge (the strategy handles that),
+    # but solar export at negative price costs money → limit PV output.
+    _apply_pv_limiter(s_now, auto)
+
+    _save_automation(auto)
+
+
+def _apply_pv_limiter(s: dict, auto: dict) -> None:
+    """
+    Set or restore the HA PV power limit entity based on the current price.
+
+    At negative/cheap prices the target is calculated dynamically so that
+    house consumption + battery charging can happen internally but nothing
+    flows back to the grid:
+
+        target_w = house_consumption_w + battery_charge_w + margin_w
+
+    - house_consumption_w: estimated from current plan slot (Wh ≈ W mean)
+    - battery_charge_w   : max_charge_kw × 1000 when battery < max_soc
+    - margin_w           : small buffer to avoid oscillation (default 200 W)
+
+    When price ≥ threshold: restore to pv_limiter_max_w (full output).
+    Only sends an HA command when the target value changes.
+    """
+    if not s.get("pv_limiter_enabled"):
+        return
+    entity = (s.get("pv_limiter_entity") or "").strip()
+    if not entity:
+        return
+
+    max_w     = int(s.get("pv_limiter_max_w",         4000))
+    threshold = float(s.get("pv_limiter_threshold_ct", 0.0)) / 100.0  # € /kWh
+    margin_w  = int(s.get("pv_limiter_margin_w",        200))
+
+    # Find current slot price, consumption estimate and battery SOC from plan
+    slots     = _plan_cache.get("slots", [])
+    price     = None
+    cons_w    = 300.0   # fallback: average house load estimate
+    soc_pct   = None
+    if slots:
+        now_local = datetime.now(ZoneInfo(s.get("timezone", "Europe/Brussels")))
+        for sl in slots:
+            try:
+                sl_dt = datetime.fromisoformat(sl["time"])
+                if sl_dt.hour == now_local.hour and sl_dt.date() == now_local.date():
+                    price   = sl.get("price_eur_kwh")
+                    # consumption_wh per hour ≈ mean watts for that hour
+                    cons_w  = float(sl.get("consumption_wh") or cons_w)
+                    soc_pct = sl.get("soc_start")
+                    break
+            except Exception:
+                pass
+
+    if price is None:
+        return  # no price data, don't touch the limiter
+
+    if price < threshold:
+        # Curtail PV to: house load + battery charge power + margin.
+        # This keeps all solar internal while charging the battery and
+        # running the house — zero export to grid.
+        max_charge_kw  = float(s.get("max_charge_kw", 3.0))
+        max_soc_pct    = float(s.get("max_soc", 95))
+        bat_charge_w   = 0
+        if soc_pct is None or soc_pct < max_soc_pct - 2:
+            bat_charge_w = int(max_charge_kw * 1000)
+        target_w = int(cons_w + bat_charge_w + margin_w)
+        target_w = max(0, min(max_w, target_w))
+    else:
+        target_w = max_w   # price OK → full PV output
+
+    last_w = auto.get("pv_limiter_last_w")
+    # Allow 50 W hysteresis to avoid chattering
+    if last_w is not None and abs(last_w - target_w) < 50:
+        return
+
+    ok = _ha_call_service("number", "set_value", {"entity_id": entity, "value": target_w})
+    if ok:
+        auto["pv_limiter_last_w"] = target_w
+        log.info("PV limiter: %s → %dW (price=%.4f, cons=%.0fW, bat_chg=%dW, threshold=%.4f)",
+                 entity, target_w, price, cons_w,
+                 int(float(s.get("max_charge_kw", 3.0)) * 1000) if price < threshold else 0,
+                 threshold)
+
+
+def _pv_limiter_tick() -> None:
+    """Fast tick (every 15 s) that only handles the PV power limiter."""
+    auto = _load_automation()
+    if not auto.get("enabled"):
+        return
+    s = load_strategy_settings()
+    if not s.get("pv_limiter_enabled"):
+        return
+    _apply_pv_limiter(s, auto)
     _save_automation(auto)
 
 
@@ -3399,9 +3519,22 @@ def _start_automation_thread(interval: int = 60) -> None:
                 log.warning("Automation thread error: %s", exc)
             _time.sleep(interval)
 
+    def pv_loop():
+        import time as _time
+        while True:
+            try:
+                _pv_limiter_tick()
+            except Exception as exc:
+                log.warning("PV limiter tick error: %s", exc)
+            _time.sleep(15)
+
     t = threading.Thread(target=loop, daemon=True, name="automation")
     t.start()
     log.info("Automation background thread started (interval=%ds)", interval)
+
+    pv = threading.Thread(target=pv_loop, daemon=True, name="pv_limiter")
+    pv.start()
+    log.info("PV limiter background thread started (interval=15s)")
 
 
 @app.route("/api/automation", methods=["GET"])

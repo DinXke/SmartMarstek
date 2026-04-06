@@ -70,6 +70,12 @@ DEFAULT_SETTINGS = {
     # price to trigger grid charging.  5ct = charge from grid when you gain ≥5ct
     # per stored kWh after efficiency + depreciation losses.
     "min_charge_spread_eur_kwh": 0.05,
+    # PV power limiter (e.g. SMA Sunny Boy via Home Assistant number entity)
+    "pv_limiter_enabled":        False,
+    "pv_limiter_entity":         "",     # HA entity_id, e.g. "number.sma_max_active_power"
+    "pv_limiter_max_w":          4000,   # restore to this value (W) when price OK
+    "pv_limiter_threshold_ct":   0.0,    # trigger below this price (ct/kWh); 0 = only negative
+    "pv_limiter_margin_w":       200,    # extra buffer above house+bat load to avoid oscillation
     # Strategy engine: "rule_based" (default) or "claude" (uses Anthropic API)
     "strategy_mode":        "rule_based",
     # Anthropic API key (only used when strategy_mode = "claude")
@@ -347,17 +353,33 @@ def build_plan(
             is_peak_hour = _is_peak(weekday, hour)
 
             # Effective charge cost = buy_price / rte + charge depreciation.
-            # NOTE: discharge depreciation is NOT subtracted here — it applies
-            # to the discharge decision, not the charge decision.  The correct
-            # profitability check is simply: charge_cost < future_savings.
             eff_charge_cost = buy_price / rte + depr   # €/kWh stored
-            charge_spread   = max_future - eff_charge_cost   # net gain/kWh
+            charge_spread   = max_future - eff_charge_cost
             min_spread      = s.get("min_charge_spread_eur_kwh", 0.05)
             is_cheap        = buy_price < p25 * 1.05
-            # Grid charge when: price in cheapest quartile, OR spread large enough
             grid_charge_ok  = charge_spread >= min_spread or (is_cheap and charge_spread > 0)
 
-            if is_peak_hour and bat_kwh > bat_min + 0.2 and buy_price >= price_median:
+            # Solar-fill check: if remaining solar today would fill the battery
+            # without grid charging, skip grid_charge (solar is free).
+            remaining_solar_today_wh = sum(
+                solar_by_slot.get(all_slots[j].isoformat(), 0.0)
+                for j in range(i, num_slots)
+                if all_slots[j].date() == slot_dt.date()
+            )
+            solar_fills_battery = (
+                remaining_solar_today_wh / 1000.0 * rte >= (bat_max - bat_kwh) - 0.1
+            )
+
+            if buy_price < 0 and bat_kwh < bat_max - 0.05:
+                # Negative price: consuming from grid is FREE or PAID.
+                # Charge at full rate — also prevents solar export which costs money.
+                can_add_kwh = bat_max - bat_kwh
+                charge_kwh  = min(can_add_kwh / rte, max_charge_kw)
+                bat_kwh    += charge_kwh * rte
+                action = GRID_CHARGE
+                reason = f"Negatieve prijs ({buy_price*100:.1f}ct) – laden = gratis/betaald"
+
+            elif is_peak_hour and bat_kwh > bat_min + 0.2 and buy_price >= price_median:
                 # Peak hour AND price is at or above the day's median.
                 # If a much better (>15%) discharge opportunity is within 16h,
                 # hold the charge for that instead.

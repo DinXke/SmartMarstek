@@ -6,6 +6,7 @@ import ForecastSettings from "./ForecastSettings.jsx";
 import StrategySettings from "./StrategySettings.jsx";
 import InfluxSettings from "./InfluxSettings.jsx";
 import FlowSourcesSettings from "./FlowSourcesSettings.jsx";
+import PvLimiterSettings from "./PvLimiterSettings.jsx";
 
 // ---------------------------------------------------------------------------
 // Persisted settings helpers (localStorage)
@@ -393,7 +394,10 @@ export default function SettingsPage({ devices, powerMap, onDeviceAdded, onDevic
       )}
 
       {tab === "bronnen" && (
-        <FlowSourcesSettings devices={devices} powerMap={powerMap ?? {}} />
+        <>
+          <FlowSourcesSettings devices={devices} powerMap={powerMap ?? {}} />
+          <PvLimiterSettings />
+        </>
       )}
 
       {tab === "prijzen" && (
