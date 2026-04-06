@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.19.59] - 2026-04-06
+
+### Improved
+- Claude AI strategie-prompt volledig herschreven:
+  - Break-even berekening per slot (`buy_price/rte + depreciation`) in de invoer meegegeven
+    zodat Claude per uur exact weet wanneer netladen winstgevend is
+  - 3-pass globaal optimalisatie-algoritme (prijscurve analyseren → SOC doorrekenen →
+    conflicten oplossen) i.p.v. greedy stap-voor-stap per uur
+  - `save` vs `neutral` tegenstrijdigheid opgelost: strikt onderscheid en expliciete
+    verbodsbepaling "nooit neutral als doel is lading bewaren"
+  - Hardgecodeerd dagpatroon (00-06u → neutral) verwijderd — regels prevaleren altijd
+  - Grid_charge regels geconsolideerd naar één sectie (was verspreid over 3+ plekken)
+  - Lookahead-logica: expliciet framework voor "spaar lading voor duur uur"
+  - SOC-cap in simulatieformules toegevoegd
+
 ## [1.19.58] - 2026-04-06
 
 ### Added
