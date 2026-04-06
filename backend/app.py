@@ -3480,20 +3480,22 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
     threshold = float(s.get("pv_limiter_threshold_ct", 0.0)) / 100.0  # € /kWh
     margin_w  = int(s.get("pv_limiter_margin_w",        200))
 
-    # Find current slot price, consumption estimate and battery SOC from plan
-    tz_name   = s.get("timezone", "Europe/Brussels")
-    now_local = datetime.now(ZoneInfo(tz_name))
-    slots     = _plan_cache.get("slots", [])
-    price     = None
-    cons_w    = 300.0   # fallback: average house load estimate
-    soc_pct   = None
+    # Find current slot price, consumption estimate, battery SOC and action from plan
+    tz_name     = s.get("timezone", "Europe/Brussels")
+    now_local   = datetime.now(ZoneInfo(tz_name))
+    slots       = _plan_cache.get("slots", [])
+    price       = None
+    cons_w      = 300.0   # fallback: average house load estimate
+    soc_pct     = None
+    slot_action = None    # planned action for current hour
     for sl in slots:
         try:
             sl_dt = datetime.fromisoformat(sl["time"])
             if sl_dt.hour == now_local.hour and sl_dt.date() == now_local.date():
-                price   = sl.get("price_eur_kwh")
-                cons_w  = float(sl.get("consumption_wh") or cons_w)
-                soc_pct = sl.get("soc_start")
+                price       = sl.get("price_eur_kwh")
+                cons_w      = float(sl.get("consumption_wh") or cons_w)
+                soc_pct     = sl.get("soc_start")
+                slot_action = sl.get("action")
                 break
         except Exception:
             pass
@@ -3522,15 +3524,27 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
         return  # no price data at all, don't touch the limiter
 
     if price < threshold:
-        # Curtail PV to: house load + battery charge power + margin.
-        # This keeps all solar internal while charging the battery and
-        # running the house — zero export to grid.
-        max_charge_kw  = float(s.get("max_charge_kw", 3.0))
-        max_soc_pct    = float(s.get("max_soc", 95))
-        bat_charge_w   = 0
-        if soc_pct is None or soc_pct < max_soc_pct - 2:
-            bat_charge_w = int(max_charge_kw * 1000)
-        target_w = int(cons_w + bat_charge_w + margin_w)
+        # Curtail PV to exactly what is needed internally (house ± battery) + margin.
+        # When battery is discharging it contributes to house load → solar target is LOWER.
+        # When battery is charging from solar (grid_charge/solar_charge) → target is HIGHER.
+        max_charge_kw = float(s.get("max_charge_kw", 3.0))
+        max_soc_pct   = float(s.get("max_soc", 95))
+
+        # Determine battery contribution to the solar budget:
+        # - GRID_CHARGE / SOLAR_CHARGE: reserve capacity for charging  (+bat_charge_w)
+        # - DISCHARGE: battery covers part of house load → less solar needed (-bat_charge_w)
+        # - ANTI_FEED / NEUTRAL: battery neither helps nor hinders  (0)
+        action_up = (slot_action or "").upper()
+        if action_up in ("GRID_CHARGE", "SOLAR_CHARGE", "FORCE_CHARGE"):
+            # Battery will charge — solar must also cover that load
+            bat_adj_w = int(max_charge_kw * 1000) if (soc_pct is None or soc_pct < max_soc_pct - 2) else 0
+        elif action_up in ("DISCHARGE", "FORCE_DISCHARGE"):
+            # Battery discharges to house — solar only needs to cover the remainder
+            bat_adj_w = -int(max_charge_kw * 1000)
+        else:
+            bat_adj_w = 0
+
+        target_w = int(cons_w + bat_adj_w + margin_w)
         target_w = max(0, min(max_w, target_w))
     else:
         target_w = max_w   # price OK → full PV output
