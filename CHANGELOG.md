@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.19.68] - 2026-04-06
+
+### Fixed
+- HomeWizard energy socket: `_hw_fetch()` gooit nu een begrijpelijke foutmelding wanneer
+  `resp.json()` faalt (niet-HTML maar ook geen geldig JSON response). Vorige gedrag toonde
+  cryptische Python JSONDecodeError. Nu: duidelijke melding met Content-Type en body-snippet.
+- UI-hint voor "Lokale API" uitgebreid met aparte instructies voor P1-meter en energy socket
+  (energy socket zit op ander pad in de HomeWizard app dan P1-meter).
+
+### Added
+- Diagnose-endpoint `GET /api/homewizard/probe?ip=X.X.X.X` — toont raw response van alle
+  HomeWizard API-paden (/api, /api/v1/data, /api/v1/state) zodat je kunt zien of Lokale API
+  ingeschakeld is zonder de add-flow te doorlopen.
+
 ## [1.19.67] - 2026-04-06
 
 ### Improved

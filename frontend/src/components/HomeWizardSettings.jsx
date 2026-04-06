@@ -184,8 +184,9 @@ function ScanDialog({ onClose, onAdd, existingIps }) {
         </div>
         <div style={{ padding: "16px 20px" }}>
           <div className="settings-row-desc" style={{ marginBottom: 12 }}>
-            Scant het subnet op HomeWizard apparaten. Vereist dat "Lokale API" ingeschakeld is
-            in de HomeWizard app.
+            Scant het subnet op HomeWizard apparaten. Vereist dat "Lokale API" ingeschakeld is:<br/>
+            • <strong>P1-meter:</strong> Instellingen → Meters → selecteer meter → Lokale API<br/>
+            • <strong>Energy socket:</strong> selecteer stopcontact → ⚙ → Lokale API
           </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <input className="form-input" value={subnet}
@@ -416,8 +417,11 @@ export default function HomeWizardSettings() {
             <div style={{ padding: "16px 20px", color: "var(--text-muted)", fontSize: 13 }}>
               Nog geen HomeWizard apparaten. Gebruik "Scannen" of voeg handmatig toe via IP.
               <br />
-              <span style={{ fontSize: 11 }}>Vereist: "Lokale API" ingeschakeld in de HomeWizard app
-                (Instellingen → Meters → … → Lokale API).</span>
+              <span style={{ fontSize: 11 }}>
+                Vereist: "Lokale API" ingeschakeld in de HomeWizard app.<br/>
+                • <strong>P1-meter:</strong> Instellingen → Meters → selecteer meter → Lokale API<br/>
+                • <strong>Energy socket:</strong> selecteer stopcontact → ⚙ (tandwiel) → Lokale API
+              </span>
             </div>
           )}
           {devices.map((d) => (

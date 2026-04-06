@@ -548,14 +548,25 @@ def _hw_fetch(ip: str, path: str, token: str | None = None, timeout: int = 5) ->
         resp = _req.get(f"http://{ip}{path}", timeout=timeout)
     resp.raise_for_status()
     # Detect HTML responses (device returned web UI instead of JSON API)
-    ct = resp.headers.get("Content-Type", "")
-    if "html" in ct or resp.text.lstrip().startswith("<!"):
+    ct   = resp.headers.get("Content-Type", "")
+    body = resp.text
+    if "html" in ct or body.lstrip().startswith("<!"):
         raise ValueError(
             f"Apparaat op {ip} stuurde HTML terug i.p.v. JSON. "
-            "Controleer of 'Lokale API' ingeschakeld is in de HomeWizard app "
-            "(Instellingen → Meters → … → Lokale API)."
+            "Controleer of 'Lokale API' ingeschakeld is in de HomeWizard app: "
+            "Energy Socket → selecteer apparaat → ⚙ → Lokale API aan. "
+            "P1-meter: Instellingen → Meters → … → Lokale API."
         )
-    return resp.json()
+    try:
+        return resp.json()
+    except Exception:
+        snippet = body.strip()[:120].replace("\n", " ")
+        raise ValueError(
+            f"Apparaat op {ip} stuurde geen geldig JSON "
+            f"(Content-Type: {ct!r}). "
+            "Controleer of 'Lokale API' ingeschakeld is. "
+            f"Ontvangen: {snippet!r}"
+        )
 
 
 def _local_subnet() -> str:
@@ -735,6 +746,38 @@ def hw_save_sensors(device_id):
     log.info("HomeWizard sensors updated  id=%s  count=%d",
              device_id, len(devices[device_id]["selected_sensors"]))
     return jsonify({"ok": True})
+
+
+@app.route("/api/homewizard/probe")
+def hw_probe_endpoint():
+    """Diagnose endpoint: raw probe of a HomeWizard device IP.
+    Returns what /api and /api/v1/data respond with (status, content-type, body snippet).
+    Usage: GET /api/homewizard/probe?ip=10.10.20.230
+    """
+    ip = (request.args.get("ip") or "").strip()
+    if not ip:
+        return jsonify({"error": "ip parameter vereist"}), 400
+    result = {}
+    for path in ("/api", "/api/v1/data", "/api/v1/state"):
+        for scheme in ("http", "https"):
+            key = f"{scheme}:{path}"
+            try:
+                kw = {"timeout": 3}
+                if scheme == "https":
+                    kw["verify"] = False
+                resp = _req.get(f"{scheme}://{ip}{path}", **kw)
+                ct   = resp.headers.get("Content-Type", "")
+                body = resp.text[:300]
+                result[key] = {
+                    "status": resp.status_code,
+                    "content_type": ct,
+                    "body_snippet": body,
+                    "is_json": "json" in ct or body.lstrip().startswith("{"),
+                    "is_html": "html" in ct or body.lstrip().startswith("<!"),
+                }
+            except Exception as exc:
+                result[key] = {"error": str(exc)}
+    return jsonify(result)
 
 
 @app.route("/api/homewizard/devices/<device_id>/pair", methods=["POST"])
