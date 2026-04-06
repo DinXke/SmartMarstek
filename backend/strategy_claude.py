@@ -36,8 +36,9 @@ _PRICE_OUT_EUR_PER_TOKEN = 4.00 / 1_000_000 * 0.92   # $4.00/MTok output
 # Usage ledger — persisted to /data/claude_usage.json
 # ---------------------------------------------------------------------------
 
-_DATA_DIR    = os.environ.get("MARSTEK_DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
-_USAGE_FILE  = os.path.join(_DATA_DIR, "claude_usage.json")
+_DATA_DIR           = os.environ.get("MARSTEK_DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+_USAGE_FILE         = os.path.join(_DATA_DIR, "claude_usage.json")
+_PRICE_HISTORY_FILE = os.path.join(_DATA_DIR, "_price_history.json")
 
 
 def _load_usage() -> list[dict]:
@@ -86,6 +87,83 @@ def get_usage_stats() -> dict:
         "all_time": _agg(records),
         "records":  len(records),
     }
+
+
+# ---------------------------------------------------------------------------
+# Historical price pattern storage and analysis
+# ---------------------------------------------------------------------------
+
+def _load_price_history() -> dict:
+    """Load stored price history. Returns {date_iso: {hour_str: all_in_price}}."""
+    try:
+        with open(_PRICE_HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _record_price_history(price_slots: dict, markup: float) -> None:
+    """Persist all-in prices from price_slots into the rolling 32-day history file."""
+    history = _load_price_history()
+    changed = False
+    for key, raw_price in price_slots.items():
+        try:
+            dt = datetime.fromisoformat(key)
+            date_str = dt.date().isoformat()
+            hour_str = str(dt.hour)
+            all_in = round(raw_price + markup, 4)
+            if history.get(date_str, {}).get(hour_str) != all_in:
+                history.setdefault(date_str, {})[hour_str] = all_in
+                changed = True
+        except Exception:
+            pass
+    if not changed:
+        return
+    # Prune to last 32 days
+    cutoff = (datetime.now(timezone.utc).date() - timedelta(days=32)).isoformat()
+    history = {k: v for k, v in history.items() if k >= cutoff}
+    try:
+        with open(_PRICE_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f)
+    except Exception as e:
+        log.warning("price_history: write failed: %s", e)
+
+
+def _compute_weekly_profile(history: dict) -> dict:
+    """Compute per-(weekday × hour) price statistics from stored history.
+
+    Returns a list of dicts (sorted by weekday, hour) — each entry:
+      {weekday, weekday_name, hour, avg, p25, p75, count}
+    Only includes buckets with at least 2 data points.
+    """
+    from datetime import date as _date_t
+
+    buckets: dict[tuple, list] = {}
+    for date_str, hours in history.items():
+        try:
+            d = _date_t.fromisoformat(date_str)
+            wd = d.weekday()
+            for hour_str, price in hours.items():
+                buckets.setdefault((wd, int(hour_str)), []).append(float(price))
+        except Exception:
+            pass
+
+    result = []
+    for (wd, h) in sorted(buckets):
+        sp = sorted(buckets[(wd, h)])
+        n = len(sp)
+        if n < 2:
+            continue
+        result.append({
+            "weekday":      wd,
+            "weekday_name": WEEKDAY_NL[wd],
+            "hour":         h,
+            "avg":          round(sum(sp) / n, 4),
+            "p25":          round(sp[max(0, int(n * 0.25) - 1)], 4),
+            "p75":          round(sp[min(n - 1, int(n * 0.75))], 4),
+            "count":        n,
+        })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -201,11 +279,48 @@ Controleer: is er voldoende SOC op elk discharge-uur? Is er genoeg ruimte op elk
 
 ---
 
+## ⚠️ Belangrijk: soc_start_pct is een SCHATTING, geen garantie
+
+De `soc_start_pct` waarden in de invoer zijn berekend op basis van `neutral` voor alle toekomstige uren (neutral-baseline).
+- Als jij **`save`** kiest: de werkelijke SOC blijft HOGER dan getoond in soc_start_pct.
+- Als jij **`grid_charge`** kiest: de SOC stijgt SNELLER dan de baseline toont.
+- Als jij **`discharge`** kiest: de SOC daalt SNELLER dan de baseline toont.
+
+**Gebruik je eigen Pass-2 SOC-simulatie** (zie Optimalisatie-algoritme) — vertrouw niet blind op de soc_start_pct invoerwaarden voor toekomstige slots als je een andere actie kiest dan neutral.
+
+---
+
+## Save 's nachts: wanneer wél, wanneer niet
+
+`save` 's nachts (net_wh < 0, geen zon) bevriest de SOC. Het net dekt al het nachtverbruik.
+
+**Save 's nachts is zinvol ALLEEN als:**
+- Er later (binnen 12u) een discharge-uur is met prijs > breakeven_eur_kwh
+- ÉN de verwachte zonne-opbrengst de volgende dag de batterij NIET volledig kan herladen vanuit een lager startniveau
+  (als zon de batterij toch van 15% naar 95% laadt, dan heeft save van 72% → 72% houden nul meerwaarde voor discharge)
+
+**Save 's nachts is NIET zinvol als:**
+- Morgen ruim voldoende zon is om de batterij volledig op te laden ongeacht het startniveau → gebruik dan `neutral`
+- De nachtprijs (13ct) dicht bij breakeven ligt → het net betalen voor nachtverbruik kost evenveel als 's avonds ontladen
+- Er geen duidelijk discharge-uur is later
+
+**Richtlijn**: Bij een verwachte zonneopbrengst > 5 kWh de volgende dag → `neutral` 's nachts (batterij draint, zon laadt terug). Bij bewolkte dag met weinig zon én hoge avondprijzen → `save` tot ca. 06:00 overwegen.
+
+---
+
+## Discharge: gebruik de volle capaciteit
+
+Bij een discharge-uur met prijs ≥ p75:
+- Alle uren met prijs ≥ p75 EN SOC > min_reserve_soc_pct + 10% = discharge
+- Kies **niet** save of neutral tijdens dure uren als de SOC hoog is — dat is gemiste winst
+- De discharge_kwh is beperkt tot het huisverbruik in dat uur (geen teruglevering). Meerdere discharge-uren = meer totale ontlading.
+- Een SOC van 95% en slechts 2 ontlaaduren van elk 300Wh is verspilling. Plan discharge op ALLE dure uren.
+
+---
+
 ## Sluipverbruik 's nachts
 Consumption_wh is altijd > 0 (koelkast, router, standby). Bij `neutral` 's nachts daalt de SOC elk uur.
-Voorbeeld: 350 Wh/u op 10 kWh → −3.5% per uur → −21% over 6 nachtu.
-De soc_start_pct in de invoer is al gesimuleerd voor toekomstige slots.
-**Als de SOC 's ochtends onvoldoende is voor de ochtendpiek: plan grid_charge de nacht ervoor.**
+Voorbeeld: 350 Wh/u op 10 kWh → −3.5% per uur → −21% over 6 uur.
 
 ---
 
@@ -217,6 +332,20 @@ De soc_start_pct in de invoer is al gesimuleerd voor toekomstige slots.
 - ❌ `neutral` als doel is lading bewaren → gebruik `save`
 - ❌ `save` als soc_start_pct < min_reserve_soc_pct + 5% (geen lading te bewaren)
 - ❌ `grid_charge` als geen enkel toekomstig uur prijs > breakeven_eur_kwh heeft (verlieslatend)
+
+---
+
+## Historisch prijsprofiel (indien aanwezig in invoer)
+
+Als de invoer een `historical_context.weekly_price_profile` bevat, gebruik dit dan actief:
+
+- **Afwijkingsdetectie**: Als de huidige prijs voor weekdag X, uur Y meer dan 20% onder het historisch gemiddelde ligt → extra kans voor `grid_charge`.
+- **Patroonherkenning**: Zie je dat elke maandag-ochtend duur is? Plan `save` of hogere SOC zondag-avond.
+- **Seizoenseffecten**: Hogere prijzen in winter (minder zon), lagere in zomer → aanpas agressiviteit van grid_charge.
+- **Weekendpatroon**: Prijzen in het weekend (za/zo) zijn typisch lager 's ochtends, pieken 's avonds → detecteer dit in het profiel.
+
+Gebruik het historisch profiel als **contextuele prior**, maar vertrouw altijd meer op de actuele prijzen in de slots.
+Vermeld in je `reason` (max 80 tekens) als je een historisch patroon gebruikt: bijv. "hist. avg €0.12 vs huidig €0.06 → goedkoop".
 
 ---
 
@@ -349,6 +478,12 @@ def build_plan_claude(
         now_local = real_now.replace(hour=0, minute=0, second=0, microsecond=0)
     all_slots = [now_local + timedelta(hours=i) for i in range(num_slots)]
 
+    # ── Record price history + build weekly profile ───────────────────────
+    _record_price_history(price_slots, markup)
+    _price_history = _load_price_history()
+    _weekly_profile = _compute_weekly_profile(_price_history)
+    _history_days   = len(_price_history)
+
     # Price statistics (all-in prices)
     known_prices = [
         price_slots[sl.isoformat()] + markup
@@ -438,6 +573,18 @@ def build_plan_claude(
         },
         "slots": slots_input,
     }
+
+    # Attach historical context when we have at least 3 days of data
+    if _weekly_profile and _history_days >= 3:
+        payload["historical_context"] = {
+            "days_of_history": _history_days,
+            "note": (
+                f"Historisch prijsprofiel op basis van {_history_days} dagen data. "
+                "Elk item: weekdag, uur, avg/p25/p75 all-in prijs (€/kWh). "
+                "Gebruik dit om te detecteren of het huidige uur goedkoop of duur is t.o.v. historisch patroon."
+            ),
+            "weekly_price_profile": _weekly_profile,
+        }
 
     tool_def = {
         "name": "submit_battery_plan",
@@ -648,6 +795,7 @@ def build_plan_claude(
         slots_received=len(plan_actions),
         action_counts=action_counts,
         breakeven_eur_kwh=breakeven,
+        price_history_days=_history_days,
         price_stats={
             "p25":    round(p25,    4),
             "median": round(median, 4),

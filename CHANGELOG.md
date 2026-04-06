@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.19.61] - 2026-04-06
+
+### Fixed
+- Claude AI strategie-prompt: `save` 's nachts veroorzaakte een circulaire redenering waarbij
+  Claude de neutral-gebaseerde `soc_start_pct` simulatiewaarden zag dalen en concludeerde dat
+  de reserve beschermd moest worden — terwijl `save` de SOC juist bevroren houdt op de
+  huidige waarde. Toegevoegd:
+  - Expliciete waarschuwing dat `soc_start_pct` een neutral-baseline schatting is, geen
+    garantie — Claude moet zijn eigen Pass-2 SOC-simulatie volgen bij afwijkende acties
+  - Duidelijke richtlijn: `save` 's nachts alleen zinvol als zon de volgende dag de batterij
+    NIET volledig herlaadt vanuit lager startniveau; bij ruim zonne-aanbod altijd `neutral`
+  - `discharge` uitgebreid: alle uren met prijs ≥ p75 én voldoende SOC moeten ontladen —
+    een volle batterij laten staan op dure uren is expliciet verboden als verspilling
+
+## [1.19.60] - 2026-04-06
+
+### Added
+- Claude AI strategie: historische prijspatronen — dagelijks worden alle-in prijzen opgeslagen
+  in `_price_history.json` (max 32 dagen). Vanaf 3 dagen data ontvangt Claude een
+  `weekly_price_profile` per (weekdag × uur) met gemiddelde, P25 en P75 — zodat het model
+  zelf afwijkingen kan detecteren (bijv. "huidig uur 40% goedkoper dan historisch gemiddeld →
+  extra grid_charge kans") zonder hardgecodeerde patronen.
+
+### Fixed
+- `_hw_devices()` en `_save_hw_devices()` omgeven met try/except: een beschadigd of leeg
+  `homewizard_devices.json`-bestand veroorzaakte een onafgevangen JSONDecodeError waardoor
+  Flask HTML 500 teruggaf i.p.v. JSON — dit was de oorzaak van "Unexpected token '<'" bij
+  het toevoegen van HomeWizard energy sockets.
+
 ## [1.19.59] - 2026-04-06
 
 ### Improved

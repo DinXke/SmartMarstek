@@ -522,15 +522,21 @@ HW_SENSOR_META: dict = {
 
 
 def _hw_devices() -> dict:
-    if os.path.exists(HW_DEVICES_FILE):
-        with open(HW_DEVICES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+    try:
+        if os.path.exists(HW_DEVICES_FILE):
+            with open(HW_DEVICES_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as exc:
+        log.error("hw_devices: failed to read %s: %s — returning empty", HW_DEVICES_FILE, exc)
     return {}
 
 
 def _save_hw_devices(devices: dict) -> None:
-    with open(HW_DEVICES_FILE, "w", encoding="utf-8") as f:
-        json.dump(devices, f, indent=2)
+    try:
+        with open(HW_DEVICES_FILE, "w", encoding="utf-8") as f:
+            json.dump(devices, f, indent=2)
+    except Exception as exc:
+        log.error("hw_devices: failed to save %s: %s", HW_DEVICES_FILE, exc)
 
 
 def _hw_fetch(ip: str, path: str, token: str | None = None, timeout: int = 5) -> dict:
