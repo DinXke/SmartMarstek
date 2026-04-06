@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.19.65] - 2026-04-06
+
+### Fixed
+- Claude AI strategie: "te voorzichtig" discharge-gedrag opgelost.
+  - **Harde discharge-regel**: prijs ≥ p75 + SOC > reserve+10% → ALTIJD discharge.
+    Enige uitzondering: binnen 2 uur is er een uur > huidige prijs × 1.10.
+  - **Save lookahead beperkt tot 3 uur**: save mag alleen uitstel geven naar een
+    discharge-uur dat maximaal 3 uur later ligt. 7+ uur sparen voor één piekmoment
+    is nu expliciet verboden.
+  - **Dubbele-winst strategie toegevoegd**: discharge nu (p75+) + grid_charge 's nachts
+    (goedkoop) + discharge morgen (piek) = meer winst dan eenmalig wachten.
+    Voorbeeld: 20:00 (€0.158) ontladen + 01:00 (€0.123) herladen + 07:00 (€0.200)
+    ontladen is altijd beter dan 7 uur sparen voor alleen 07:00.
+  - **Verboden combinaties uitgebreid**: save bij prijs ≥ p75 is nu expliciet verboden;
+    save langer dan 3 uur aaneengesloten met goedkope nachtlading tussenin is verboden.
+
+### Added
+- README.md: uitgebreide Nederlandstalige en Engelstalige documentatie toegevoegd.
+
 ## [1.19.64] - 2026-04-06
 
 ### Added

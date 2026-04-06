@@ -552,10 +552,12 @@ Controleer: is er voldoende SOC op elk discharge-uur? Is er genoeg ruimte op elk
 - EN er is voldoende recent opgeladen (geen nutteloze ontlading bij bijna-lege batterij)
 
 **`save`** — gebruik als:
-- Huidig uur: prijs < gemiddelde van de komende 4 uur × 0.85
-- EN komende 4 uur: er is een uur met prijs ≥ p75 of discharge-kandidaat
-- EN soc_start_pct > min_reserve_soc_pct + 5% (heeft zin om te bewaren)
-- **LET OP:** save kost geld (je koopt dure stroom van het net voor het verbruik nu). Gebruik save enkel als het voordeel van discharge later opweegt.
+- Huidig uur: prijs < gemiddelde van de komende **2 uur** × 0.90 (max 10% goedkoper dan binnenkort)
+- EN er is een discharge-uur **binnen de komende 3 uur** (niet 10+ uur later!)
+- EN soc_start_pct > min_reserve_soc_pct + 5%
+- **LET OP:** save kost geld (net dekt al het verbruik). Gebruik save enkel als het discharge-uur DICHTBIJ is (≤ 3 uur).
+- **NOOIT save als huidig uur zelf ≥ p75** — dan is discharge de correcte actie, ook als er morgen een nog duurder uur is.
+- **NOOIT 7+ uur save** voor één ontlaadmoment — herlaad dan liever 's nachts goedkoop en ontlaad tweemaal.
 
 **`solar_charge`** — gebruik als:
 - net_wh > 200 Wh (voldoende zonne-overschot)
@@ -598,11 +600,29 @@ De `soc_start_pct` waarden in de invoer zijn berekend op basis van `neutral` voo
 
 ## Discharge: gebruik de volle capaciteit
 
-Bij een discharge-uur met prijs ≥ p75:
-- Alle uren met prijs ≥ p75 EN SOC > min_reserve_soc_pct + 10% = discharge
-- Kies **niet** save of neutral tijdens dure uren als de SOC hoog is — dat is gemiste winst
-- De discharge_kwh is beperkt tot het huisverbruik in dat uur (geen teruglevering). Meerdere discharge-uren = meer totale ontlading.
-- Een SOC van 95% en slechts 2 ontlaaduren van elk 300Wh is verspilling. Plan discharge op ALLE dure uren.
+**Harde regel:** Als `buy_price ≥ p75` EN `soc_start_pct > min_reserve_soc_pct + 10%` → **ALTIJD discharge**.
+De enige uitzondering: er is een uur binnen de komende **2 uur** met prijs > huidige prijs × 1.10 (meer dan 10% duurder). Dan mag je dat ene uur afwachten.
+
+- Alle uren met prijs ≥ p75 EN SOC hoog genoeg = discharge. Geen uitzonderingen voor "spaar voor morgen".
+- Kies **nooit** save of neutral tijdens p75+-uren als de SOC hoog is — dat is aantoonbaar gemiste winst.
+- De discharge_kwh is beperkt tot het huisverbruik in dat uur. Meerdere discharge-uren = meer totale besparing.
+- Een SOC van 95% met slechts 2 kleine ontlaaduren is verspilling. Plan discharge op ALLE p75+-uren.
+
+---
+
+## Dubbele winst: ontladen nu + herladen goedkoop + ontladen morgen
+
+Dit is de meest winstgevende strategie wanneer alle drie van toepassing zijn:
+1. Huidig uur: prijs ≥ p75 (ontladen loont nu)
+2. Tussenin (komende nachtur): prijs < breakeven (goedkoop herladen mogelijk)
+3. Morgen: duur piekuur > breakeven van nachtlading (ontladen loont dan ook)
+
+**Voorbeeld:** SOC 63%, uur 20:00 (€0.158 = p75), nacht 01:00 (€0.123 < breakeven), morgen 07:00 (€0.200)
+- ❌ Fout: save tot 07:00 → eenmalig ontladen = €0.158 × X kWh bespaard
+- ✅ Correct: discharge 20:00 (€0.158) + grid_charge 01:00 (€0.123) + discharge 07:00 (€0.200)
+  = dubbele ontlading, netto extra winst per kWh = (0.200 − 0.123/RTE−depreciation) + 0.158
+
+**Conclusie:** Als p75+-uur aanwezig is én goedkope nachtlading tussenin mogelijk is → ontlaad NU ook, herlaad 's nachts, ontlaad morgen. Wacht NIET 7+ uur met een volle batterij op één goed moment.
 
 ---
 
@@ -619,6 +639,8 @@ Voorbeeld: 350 Wh/u op 10 kWh → −3.5% per uur → −21% over 6 uur.
 - ❌ `solar_charge` bij negatieve of near-zero prijs (< 0.02 €/kWh) → `grid_charge`
 - ❌ `neutral` als doel is lading bewaren → gebruik `save`
 - ❌ `save` als soc_start_pct < min_reserve_soc_pct + 5% (geen lading te bewaren)
+- ❌ `save` als huidig uur buy_price ≥ p75 → dit is een discharge-uur, niet een spaarmomenten
+- ❌ `save` langer dan 3 opeenvolgende uren wanneer er tussenin goedkope nachtlading mogelijk is
 - ❌ `grid_charge` als geen enkel toekomstig uur prijs > breakeven_eur_kwh heeft (verlieslatend)
 
 ---
