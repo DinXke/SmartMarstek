@@ -639,6 +639,50 @@ Dit is de meest winstgevende strategie wanneer alle drie van toepassing zijn:
 
 ---
 
+## Nachtlading voor ochtendpiek: prijsverschil berekening
+
+Doe deze analyse **altijd** wanneer er een ochtendpiek is (uren 06:00–10:00 met prijs ≥ p75):
+
+### Stap 1 — Bereken verwachte SOC bij zonsopgang
+```
+uren_tot_06u = aantal uren van nu tot 06:00
+drain_pct = (standby_w / (capacity_kwh × 1000)) × 100 × uren_tot_06u
+soc_bij_06u = huidig_soc - drain_pct   (bij neutral de hele nacht)
+```
+
+### Stap 2 — Bepaal benodigde SOC voor ochtendpiek
+```
+piek_verbruik_kwh = som(consumption_wh voor uren met prijs ≥ p75, 06:00–10:00) / 1000
+soc_nodig = (piek_verbruik_kwh / capacity_kwh) × 100 + min_reserve_soc_pct
+```
+
+### Stap 3 — Is nachtlading winstgevend?
+```
+tekort_pct = max(0, soc_nodig - soc_bij_06u)
+```
+Als `tekort_pct > 0`:
+- Goedkoopste nachtuur (00:00–05:00): `nacht_prijs`
+- Ochtendpiekprijs: `ochtend_prijs`
+- Break-even nachtlading: `nacht_prijs / rte + depreciation`
+- **Laad als:** `ochtend_prijs > nacht_prijs / rte + depreciation`
+  → kies `grid_charge` in het goedkoopste nachtuur (of meerdere uren als tekort groot is)
+
+### Stap 4 — Hoeveel uren laden?
+```
+kwh_per_laaduur = max_charge_kw × rte
+uren_nodig = ceil(tekort_pct × capacity_kwh / 100 / kwh_per_laaduur)
+```
+Plan grid_charge in de `uren_nodig` goedkoopste nachturen (00:00–05:00).
+
+**Voorbeeld:**
+- SOC nu 45%, standby 300W, cap 10kWh, 8u tot 06:00 → drain = 2.4% per uur × 8 = 24% → SOC bij 06:00 = 21%
+- Ochtendpiek 07:00-08:00: 2 × 300Wh = 0.6 kWh nodig → soc_nodig = 6% + 15% reserve = 21%
+- Tekort = 0% → geen lading nodig ✓
+- **Maar:** als drain 30% is → SOC bij 06:00 = 15% = precies reserve → tekort = 6% → 1 uur grid_charge 's nachts nodig
+- Laad dan op het goedkoopste nachtuur (bijv. 02:00 of 03:00) als ochtendprijs > breakeven
+
+---
+
 ## Verboden combinaties (harde constraints)
 - ❌ `discharge` als soc_start_pct ≤ min_reserve_soc_pct
 - ❌ `grid_charge` als soc_start_pct ≥ max_soc_pct

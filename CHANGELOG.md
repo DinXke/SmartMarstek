@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.19.67] - 2026-04-06
+
+### Improved
+- Claude AI strategie: expliciete 4-staps nachtlading berekening toegevoegd aan de prompt.
+  Claude berekent nu zelf of `grid_charge` 's nachts winstgevend is op basis van:
+  1. Verwachte SOC bij zonsopgang (standby_w × uren drain)
+  2. Benodigde SOC voor ochtendpiek (som verbruik p75+-uren / capaciteit + reserve)
+  3. Winstberekening: ochtendprijs > nachtprijs/RTE + afschrijving
+  4. Aantal benodigde laaduren (tekort / (max_charge_kw × RTE))
+  Hierdoor plant Claude automatisch nachtlading wanneer de batterij te leeg is om
+  de ochtendpiek te overbruggen én het prijsverschil nacht→ochtend groot genoeg is.
+
 ## [1.19.66] - 2026-04-06
 
 ### Improved
