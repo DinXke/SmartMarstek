@@ -11,4 +11,4 @@ labels:
   io.hass.description: "Smart battery management for Marstek batteries"
   io.hass.arch: "aarch64|amd64"
   io.hass.type: "addon"
-  io.hass.version: "1.19.45"
+  io.hass.version: "1.19.46"

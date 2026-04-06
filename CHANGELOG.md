@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.19.46] - 2026-04-06
+
+### Added
+- PV-limiter instellingen in de ⚡ Bronnen-tab: kies de HA `number.*` entiteit
+  van je omvormer (bijv. SMA Sunny Boy maximaal AC-vermogen) uit een
+  doorzoekbare dropdownlijst
+- Instellingen: aan/uit toggle, maximaal PV-vermogen (W), prijsdrempel (ct/kWh)
+  en extra marge (W)
+- Backend: `/api/strategy/settings` accepteert nu ook PATCH naast POST
+
 ## [1.19.45] - 2026-04-05
 
 ### Fixed
