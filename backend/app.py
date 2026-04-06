@@ -3481,26 +3481,45 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
     margin_w  = int(s.get("pv_limiter_margin_w",        200))
 
     # Find current slot price, consumption estimate and battery SOC from plan
+    tz_name   = s.get("timezone", "Europe/Brussels")
+    now_local = datetime.now(ZoneInfo(tz_name))
     slots     = _plan_cache.get("slots", [])
     price     = None
     cons_w    = 300.0   # fallback: average house load estimate
     soc_pct   = None
-    if slots:
-        now_local = datetime.now(ZoneInfo(s.get("timezone", "Europe/Brussels")))
-        for sl in slots:
-            try:
-                sl_dt = datetime.fromisoformat(sl["time"])
-                if sl_dt.hour == now_local.hour and sl_dt.date() == now_local.date():
-                    price   = sl.get("price_eur_kwh")
-                    # consumption_wh per hour ≈ mean watts for that hour
-                    cons_w  = float(sl.get("consumption_wh") or cons_w)
-                    soc_pct = sl.get("soc_start")
-                    break
-            except Exception:
-                pass
+    for sl in slots:
+        try:
+            sl_dt = datetime.fromisoformat(sl["time"])
+            if sl_dt.hour == now_local.hour and sl_dt.date() == now_local.date():
+                price   = sl.get("price_eur_kwh")
+                cons_w  = float(sl.get("consumption_wh") or cons_w)
+                soc_pct = sl.get("soc_start")
+                break
+        except Exception:
+            pass
+
+    # Fallback: read directly from price cache when no plan is available
+    if price is None:
+        today_key = now_local.date().isoformat()
+        cached    = _price_cache.get(today_key)
+        if cached:
+            rows       = (cached.get("data") or {}).get("today", [])
+            price_src  = s.get("price_source", "entsoe")
+            markup     = 0.0 if price_src == "frank" else float(s.get("grid_markup_eur_kwh", 0.133))
+            for row in rows:
+                try:
+                    dt_raw = datetime.fromisoformat(row["from"])
+                    if dt_raw.tzinfo is None:
+                        dt_raw = dt_raw.replace(tzinfo=timezone.utc)
+                    dt_loc = dt_raw.astimezone(ZoneInfo(tz_name))
+                    if dt_loc.date() == now_local.date() and dt_loc.hour == now_local.hour:
+                        price = float(row["marketPrice"]) + markup
+                        break
+                except Exception:
+                    continue
 
     if price is None:
-        return  # no price data, don't touch the limiter
+        return  # no price data at all, don't touch the limiter
 
     if price < threshold:
         # Curtail PV to: house load + battery charge power + margin.
