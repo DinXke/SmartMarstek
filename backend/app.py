@@ -1853,6 +1853,78 @@ def debug_info():
     })
 
 
+@app.route("/api/debug/soc", methods=["GET"])
+def debug_soc():
+    """Diagnose SOC sources: shows what each source returns for bat_soc."""
+    import time as _t
+    result = {}
+
+    # 1. last_soc.json
+    try:
+        _soc_file = os.path.join(DATA_DIR, "last_soc.json")
+        with open(_soc_file, encoding="utf-8") as _f:
+            _sc = json.load(_f)
+        age_s = _t.time() - _sc.get("ts", 0)
+        result["last_soc_json"] = {"soc": _sc.get("soc"), "age_s": round(age_s, 0), "fresh": age_s < 300}
+    except Exception as e:
+        result["last_soc_json"] = {"error": str(e)}
+
+    # 2. ESPHome direct SSE poll
+    try:
+        from influx_writer import _poll_esphome
+        esphome_map = _poll_esphome(load_devices())
+        esphome_socs = {dev_id: v.get("soc") for dev_id, v in esphome_map.items()}
+        raw_socs = [v for v in esphome_socs.values() if v is not None]
+        result["esphome_poll"] = {
+            "per_device": esphome_socs,
+            "average": round(sum(raw_socs) / len(raw_socs), 1) if raw_socs else None,
+        }
+    except Exception as e:
+        result["esphome_poll"] = {"error": str(e)}
+
+    # 3. flow_cfg bat_soc slot
+    try:
+        from influx_writer import _poll_esphome, _resolve_slot
+        live_cfg: dict = {}
+        with open(FLOW_CFG_SERVER_FILE, "r", encoding="utf-8") as _f:
+            raw = json.load(_f)
+        for k, v in raw.items():
+            live_cfg[k] = v if isinstance(v, list) else [v]
+        bat_soc_entries = live_cfg.get("bat_soc", [])
+        result["flow_cfg_bat_soc"] = bat_soc_entries
+        if bat_soc_entries:
+            esphome_map2 = _poll_esphome(load_devices())
+            ha_soc_data: dict = {}
+            ha_s = _ha_effective_settings()
+            if ha_s.get("token") and ha_s.get("url"):
+                ha_eids = [e["sensor"] for e in bat_soc_entries
+                           if e.get("source") == "homeassistant" and e.get("sensor")]
+                for eid in ha_eids:
+                    try:
+                        r = _req.get(f"{ha_s['url']}/api/states/{eid}",
+                                     headers=_ha_headers(ha_s["token"]),
+                                     timeout=4, verify=False)
+                        ha_soc_data[eid] = {"status": r.status_code,
+                                            "value": r.json().get("state") if r.ok else None}
+                    except Exception as ex:
+                        ha_soc_data[eid] = {"error": str(ex)}
+            result["flow_cfg_ha_data"] = ha_soc_data
+            val = _resolve_slot("bat_soc", live_cfg, esphome_map2, None,
+                                {k: {"value": float(v["value"])} for k, v in ha_soc_data.items()
+                                 if v.get("value") is not None})
+            result["flow_cfg_resolved"] = val
+    except Exception as e:
+        result["flow_cfg_slot"] = {"error": str(e)}
+
+    # 4. _live_soc() combined result
+    result["live_soc_result"] = _live_soc()
+
+    # 5. plan cache soc_now
+    result["plan_cache_soc_now"] = _plan_cache.get("result", {}).get("soc_now")
+
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # Strategy & InfluxDB
 # ---------------------------------------------------------------------------

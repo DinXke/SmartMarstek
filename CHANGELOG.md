@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.73] - 2026-04-07
+
+### Added
+- Diagnose-endpoint `GET /api/debug/soc` — toont per bron wat de SOC oplevert:
+  last_soc.json (leeftijd), ESPHome SSE-poll per apparaat, flow_cfg bat_soc-slot,
+  HA-entiteit status en de gecombineerde `_live_soc()` uitkomst. Handig om te zien
+  waarom SOC 50% blijft.
+
 ## [1.19.72] - 2026-04-07
 
 ### Fixed
