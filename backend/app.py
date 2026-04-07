@@ -3387,13 +3387,42 @@ def _solar_overproduction_w() -> float | None:
 
 
 def _live_soc() -> float | None:
-    """Return the most recent battery SOC, trying multiple sources in order.
+    """Return the most recent battery SOC, trying multiple sources in priority order.
 
-    1. last_soc.json  – written every ~30 s by the data collector (fastest)
-    2. _read_live_flow_slots("bat_soc") – direct ESPHome + HA poll (always fresh)
-    3. ESPHome direct poll – works even when bat_soc not in flow_cfg
+    1. Home Assistant sensor(s) configured in flow_cfg bat_soc – always cached in HA
+    2. last_soc.json  – written every ~30 s by the data collector
+    3. ESPHome direct poll via SSE – works even when bat_soc not in flow_cfg
     """
-    # 1. last_soc.json (< 5 min old)
+    # 1. HA sources configured in flow_cfg (highest priority – always cached in HA)
+    try:
+        live_cfg: dict = {}
+        with open(FLOW_CFG_SERVER_FILE, "r", encoding="utf-8") as _f:
+            raw = json.load(_f)
+        for k, v in raw.items():
+            live_cfg[k] = v if isinstance(v, list) else [v]
+        ha_entries = [e for e in live_cfg.get("bat_soc", [])
+                      if e.get("source") == "homeassistant" and e.get("sensor")]
+        if ha_entries:
+            ha_s = _ha_effective_settings()
+            if ha_s.get("token") and ha_s.get("url"):
+                socs = []
+                for e in ha_entries:
+                    try:
+                        r = _req.get(f"{ha_s['url']}/api/states/{e['sensor']}",
+                                     headers=_ha_headers(ha_s["token"]),
+                                     timeout=4, verify=False)
+                        if r.ok:
+                            socs.append(float(r.json().get("state", "nan")))
+                    except Exception:
+                        pass
+                if socs:
+                    soc = sum(socs) / len(socs)
+                    log.debug("_live_soc: from HA sensors (%d): %.1f%%", len(socs), soc)
+                    return soc
+    except Exception:
+        pass
+
+    # 2. last_soc.json (< 5 min old)
     try:
         _soc_file = os.path.join(DATA_DIR, "last_soc.json")
         with open(_soc_file, encoding="utf-8") as _f:
@@ -3403,16 +3432,7 @@ def _live_soc() -> float | None:
     except Exception:
         pass
 
-    # 2. Live poll via configured flow sources
-    try:
-        val = _read_live_flow_slots("bat_soc").get("bat_soc")
-        if val is not None:
-            log.debug("_live_soc: from flow poll: %.1f%%", val)
-            return float(val)
-    except Exception:
-        pass
-
-    # 3. Direct ESPHome poll (no flow_cfg needed)
+    # 3. ESPHome direct SSE poll (no flow_cfg needed; Dutch entity names now supported)
     try:
         from influx_writer import _poll_esphome
         esphome_map = _poll_esphome(load_devices())

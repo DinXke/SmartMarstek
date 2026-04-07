@@ -103,6 +103,7 @@ def _poll_esphome(devices: dict) -> dict:
         (["state", "charge"],   "soc"),
         (["battery", "soc"],    "soc"),
         (["bat", "soc"],        "soc"),
+        (["laadniveau"],        "soc"),   # Dutch ESPHome firmware
         (["battery", "power"],  "batPower"),
         (["bat", "power"],      "batPower"),
         (["ac", "power"],       "acPower"),

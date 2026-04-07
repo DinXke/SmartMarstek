@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.19.74] - 2026-04-07
+
+### Fixed
+- **SOC-bronprioriteit**: `_live_soc()` probeert nu HA-sensoren als eerste bron (altijd
+  gecached in HA, ongeacht InfluxDB), dan `last_soc.json`, dan ESPHome directe poll.
+  Hierdoor is de geconfigureerde HA-sensor leidend voor alle SOC-beslissingen.
+- **ESPHome Dutch firmware**: `_poll_esphome()` NAME_MAP uitgebreid met `["laadniveau"]`
+  zodat Nederlandse ESPHome-entiteiten ("Laadniveau (SOC)") correct gematcht worden als SOC.
+
 ## [1.19.73] - 2026-04-07
 
 ### Added
