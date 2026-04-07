@@ -3047,72 +3047,29 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
         return d, src
 
     def _do_soc():
-        soc = None
+        # Simply reuse _live_soc() which tries all sources in order:
+        # last_soc.json → flow-slot poll (ESPHome+HA) → ESPHome direct.
+        # Then fall back to InfluxDB queries if that also returns None.
+        soc = _live_soc()
+        if soc is not None:
+            log.info("_compute_forward_plan: SoC from live poll: %.1f%%", soc)
+            return soc
+        # External InfluxDB (HA-side)
         if ext_configured:
             try:
                 ext_socs = _query_external_influx_slot_latest("bat_soc")
                 if ext_socs:
                     soc = sum(ext_socs) / len(ext_socs)
+                    log.info("_compute_forward_plan: SoC from external InfluxDB: %.1f%%", soc)
             except Exception:
                 pass
+        # Local InfluxDB
         if soc is None:
             try:
                 recent = query_recent_points(hours=1)
                 soc = next((p["bat_soc"] for p in reversed(recent) if "bat_soc" in p), None)
-            except Exception:
-                pass
-        if soc is None:
-            try:
-                from influx_writer import _poll_esphome, _resolve_slot
-                devices_dict = load_devices()
-                live_cfg: dict = {}
-                try:
-                    with open(FLOW_CFG_SERVER_FILE, "r", encoding="utf-8") as f:
-                        raw = json.load(f)
-                    for k, v in raw.items():
-                        live_cfg[k] = v if isinstance(v, list) else [v]
-                except Exception:
-                    pass
-                esphome_map = _poll_esphome(devices_dict)
-                soc_entries = live_cfg.get("bat_soc", [])
-                if soc_entries:
-                    ha_soc_data: dict = {}
-                    ha_s = _ha_effective_settings()
-                    if ha_s.get("token") and ha_s.get("url"):
-                        ha_eids = [e["sensor"] for e in soc_entries
-                                   if e.get("source") == "homeassistant" and e.get("sensor")]
-                        for eid in ha_eids:
-                            try:
-                                r = _req.get(f"{ha_s['url']}/api/states/{eid}",
-                                             headers=_ha_headers(ha_s["token"]),
-                                             timeout=4, verify=False)
-                                if r.ok:
-                                    try:
-                                        ha_soc_data[eid] = {"value": float(r.json().get("state", ""))}
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
-                    soc_val = _resolve_slot("bat_soc", live_cfg, esphome_map, None, ha_soc_data)
-                    if soc_val is not None:
-                        soc = float(soc_val)
-                # Fallback: average soc directly from all polled ESPHome devices
-                # (works even when bat_soc is not configured in flow sources)
-                if soc is None and esphome_map:
-                    raw_socs = [v["soc"] for v in esphome_map.values() if "soc" in v]
-                    if raw_socs:
-                        soc = sum(raw_socs) / len(raw_socs)
-                        log.info("_compute_forward_plan: SoC from ESPHome direct poll: %.1f%%", soc)
-            except Exception as exc:
-                log.warning("_compute_forward_plan: SoC live-poll failed: %s", exc)
-        if soc is None:
-            try:
-                _soc_file = os.path.join(DATA_DIR, "last_soc.json")
-                with open(_soc_file, encoding="utf-8") as _f:
-                    _sc = json.load(_f)
-                if time.time() - _sc.get("ts", 0) < 3600:
-                    soc = float(_sc["soc"])
-                    log.info("_compute_forward_plan: SoC from cache file: %.1f%%", soc)
+                if soc is not None:
+                    log.info("_compute_forward_plan: SoC from local InfluxDB: %.1f%%", soc)
             except Exception:
                 pass
         if soc is None:

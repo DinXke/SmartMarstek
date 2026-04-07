@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.19.72] - 2026-04-07
+
+### Fixed
+- **SOC 50% ook in plan-berekening**: `_do_soc()` gebruikte eerst de (falende) lokale InfluxDB
+  en kwam dan pas toe aan de ESPHome/HA live-poll. Nu hergebruikt `_do_soc()` de robuustere
+  `_live_soc()` als eerste stap (last_soc.json → flow-poll → ESPHome direct), en valt pas daarna
+  terug op externe/lokale InfluxDB. Hierdoor krijgt Claude de correcte startSOC ook als de
+  lokale InfluxDB niet bereikbaar is — wat direct impact had op de hele planningsimulatie.
+
 ## [1.19.71] - 2026-04-07
 
 ### Fixed
