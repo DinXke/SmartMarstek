@@ -3358,15 +3358,43 @@ def _solar_overproduction_w() -> float | None:
 
 
 def _live_soc() -> float | None:
-    """Read the most recent SOC from last_soc.json (updated every ~30s by the data collector)."""
+    """Return the most recent battery SOC, trying multiple sources in order.
+
+    1. last_soc.json  – written every ~30 s by the data collector (fastest)
+    2. _read_live_flow_slots("bat_soc") – direct ESPHome + HA poll (always fresh)
+    3. ESPHome direct poll – works even when bat_soc not in flow_cfg
+    """
+    # 1. last_soc.json (< 5 min old)
     try:
         _soc_file = os.path.join(DATA_DIR, "last_soc.json")
         with open(_soc_file, encoding="utf-8") as _f:
             _sc = json.load(_f)
-        if time.time() - _sc.get("ts", 0) < 300:   # accept if < 5 min old
+        if time.time() - _sc.get("ts", 0) < 300:
             return float(_sc["soc"])
     except Exception:
         pass
+
+    # 2. Live poll via configured flow sources
+    try:
+        val = _read_live_flow_slots("bat_soc").get("bat_soc")
+        if val is not None:
+            log.debug("_live_soc: from flow poll: %.1f%%", val)
+            return float(val)
+    except Exception:
+        pass
+
+    # 3. Direct ESPHome poll (no flow_cfg needed)
+    try:
+        from influx_writer import _poll_esphome
+        esphome_map = _poll_esphome(load_devices())
+        raw_socs = [v["soc"] for v in esphome_map.values() if "soc" in v]
+        if raw_socs:
+            soc = sum(raw_socs) / len(raw_socs)
+            log.debug("_live_soc: from ESPHome direct poll: %.1f%%", soc)
+            return soc
+    except Exception:
+        pass
+
     return None
 
 

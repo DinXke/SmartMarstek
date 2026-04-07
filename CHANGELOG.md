@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.19.71] - 2026-04-07
+
+### Fixed
+- **SOC: 50% — definitieve fix**: `_live_soc()` probeert nu drie bronnen in volgorde:
+  1. `last_soc.json` (geschreven door datacollector, < 5 min oud)
+  2. Directe live-poll via geconfigureerde flow-bronnen (ESPHome + HA) — werkt ook als lokale InfluxDB niet draait
+  3. ESPHome directe poll — werkt zelfs zonder bat_soc in flow-config
+  Hierdoor toont de strategie-pagina altijd de werkelijke SOC, ook wanneer de lokale InfluxDB
+  niet beschikbaar is (Connection refused op localhost:8086).
+
 ## [1.19.70] - 2026-04-07
 
 ### Fixed
