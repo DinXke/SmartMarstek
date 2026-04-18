@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.19.85] - 2026-04-18
+
+### Added
+- **Realtime data van vandaag in strategie** ([SCH-18](/SCH/issues/SCH-18)): bij het vernieuwen
+  worden nu de werkelijke InfluxDB-metingen van vandaag (zon, verbruik, net) gebruikt voor de
+  al verlopen uren. Voorheen werd altijd de forecast/historisch gemiddelde gebruikt, ook voor
+  uren die al voorbij waren. Voordelen:
+  - Claude ziet hoeveel zon er **werkelijk** was (bijv. 7.4 kWh zo ver vandaag) i.p.v. de
+    voorspelling voor die uren.
+  - Een `vandaag_tot_nu`-samenvatting (totaal zon, verbruik, net) wordt toegevoegd aan het
+    Claude-verzoek zodat hij de dagcontext kent.
+  - Slots met werkelijke data krijgen `"used_actual": true` als vlag.
+- **Verbruiksprofiel vernieuwd bij handmatige refresh**: de 30-minuten cache van het historisch
+  verbruiksprofiel wordt nu omzeild wanneer de gebruiker handmatig op "Vernieuwen" klikt.
+
 ## [1.19.84] - 2026-04-18
 
 ### Fixed

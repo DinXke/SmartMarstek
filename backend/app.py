@@ -3071,7 +3071,7 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
         # Cache key: settings that affect the profile
         cache_key = f"{cons_source_pref}:{history_days}:{tz_name}"
         ca = _consumption_cache.get("fetched_at")
-        if (ca and _consumption_cache.get("key") == cache_key
+        if (not force_claude and ca and _consumption_cache.get("key") == cache_key
                 and _consumption_cache.get("data")):
             age_s = (datetime.now(timezone.utc)
                      - datetime.fromisoformat(ca)).total_seconds()
@@ -3173,6 +3173,17 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
     log.info("_compute_forward_plan: consumption=%s (%d slots), prices=%d, solar=%d, SoC=%.1f%%",
              consumption_source, len(consumption_by_hour), len(prices), len(solar_wh), soc_now)
 
+    # ── Today's InfluxDB actuals (for past hours — more accurate than forecast) ──
+    today_actuals: dict = {}
+    try:
+        from influx_writer import query_day_actuals as _qda
+        _today_str = datetime.now(ZoneInfo(tz_name)).date().isoformat()
+        today_actuals = _qda(_today_str, tz_name)
+        if today_actuals:
+            log.info("_compute_forward_plan: today actuals loaded (%d hours)", len(today_actuals))
+    except Exception:
+        pass
+
     # ── Price fingerprint (for Claude cache invalidation) ─────────────────
     # Hash the sorted "from" timestamps of all price slots. Changes only when
     # new prices are published (once per day, ~14:00 for next day).
@@ -3200,7 +3211,8 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
                  _cached_fp or "none", _price_fp)
         try:
             import strategy_claude as _sc_mod
-            plan = _sc_mod.build_plan_claude(prices, solar_wh, consumption_by_hour, soc_now, s)
+            plan = _sc_mod.build_plan_claude(prices, solar_wh, consumption_by_hour, soc_now, s,
+                                              today_actuals=today_actuals)
             _claude_debug = _sc_mod.get_last_debug()
             log.info("_compute_forward_plan: Claude engine done  fallback=%s",
                      _claude_debug.get("fallback"))

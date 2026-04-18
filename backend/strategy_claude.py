@@ -682,6 +682,7 @@ def build_plan_claude(
     settings: Optional[dict] = None,
     start_dt: Optional[datetime] = None,
     num_slots: int = 48,
+    today_actuals: Optional[dict] = None,
 ) -> list[dict]:
     """
     Build an hourly battery plan using the Claude AI API.
@@ -842,8 +843,15 @@ def build_plan_claude(
         key   = slot_dt.isoformat()
         raw   = price_slots.get(key)
         buy   = (raw + markup) if raw is not None else None
-        solar = round(solar_by_slot.get(key, 0.0))
-        cons  = round(_cons(slot_dt.weekday(), slot_dt.hour))
+
+        # For past hours: use today's InfluxDB actuals instead of forecast/historical
+        is_past = slot_dt < real_now
+        actual_row = (today_actuals or {}).get(slot_dt.hour, {}) if is_past else {}
+        actual_solar = actual_row.get("solar_w")   # W·h ≈ Wh for 1h average
+        actual_cons  = actual_row.get("house_w")
+
+        solar = round(actual_solar if actual_solar is not None else solar_by_slot.get(key, 0.0))
+        cons  = round(actual_cons  if actual_cons  is not None else _cons(slot_dt.weekday(), slot_dt.hour))
         net   = solar - cons
 
         # Per-slot break-even: minimum future discharge price to make this charge profitable
@@ -861,7 +869,7 @@ def build_plan_claude(
         else:
             gc_potential = None
 
-        slots_input.append({
+        slot_entry: dict = {
             "time":                        key,
             "weekday":                     WEEKDAY_NL[slot_dt.weekday()],
             "hour":                        slot_dt.hour,
@@ -872,8 +880,11 @@ def build_plan_claude(
             "consumption_wh":              cons,
             "net_wh":                      net,
             "soc_start_pct":               round((_bat_sim / cap_kwh) * 100, 1),
-            "is_past":                     slot_dt < real_now,
-        })
+            "is_past":                     is_past,
+        }
+        if is_past and (actual_solar is not None or actual_cons is not None):
+            slot_entry["used_actual"] = True
+        slots_input.append(slot_entry)
 
         # Advance simulated SOC assuming neutral (battery covers net consumption)
         if slot_dt >= real_now:
@@ -883,6 +894,26 @@ def build_plan_claude(
             else:
                 # Consumption exceeds solar: battery drains (down to reserve)
                 _bat_sim = max(bat_min, _bat_sim + net / 1000.0)
+
+    # ── Vandaag-tot-nu samenvatting voor Claude ───────────────────────────
+    vandaag_tot_nu: dict = {}
+    if today_actuals:
+        past_hours = sorted(h for h in today_actuals if h < real_now.hour)
+        if past_hours:
+            tot_solar = sum(today_actuals[h].get("solar_w", 0.0) for h in past_hours)
+            tot_house = sum(today_actuals[h].get("house_w", 0.0) for h in past_hours)
+            tot_net   = sum(today_actuals[h].get("net_w",  0.0) for h in past_hours)
+            vandaag_tot_nu = {
+                "gemeten_uren":      past_hours,
+                "totaal_zon_wh":     round(tot_solar),
+                "totaal_verbruik_wh": round(tot_house),
+                "totaal_net_wh":     round(tot_net),
+                "note": (
+                    f"Werkelijke InfluxDB-metingen vandaag uur {past_hours[0]:02d}:00–{past_hours[-1]+1:02d}:00. "
+                    "Zonwaarden in de slots voor deze uren zijn al vervangen door de werkelijke meting. "
+                    "Gebruik dit om te beoordelen of de dag zonniger/bewolkter was dan verwacht."
+                ),
+            }
 
     # ── Build Claude request payload ──────────────────────────────────────
     payload = {
@@ -949,6 +980,9 @@ def build_plan_claude(
         }
     if historical_context:
         payload["historical_context"] = historical_context
+
+    if vandaag_tot_nu:
+        payload["vandaag_tot_nu"] = vandaag_tot_nu
 
     tool_def = {
         "name": "submit_battery_plan",
