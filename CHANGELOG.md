@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.19.84] - 2026-04-18
+
+### Fixed
+- **SOC altijd 50% — root cause** ([SCH-18](/SCH/issues/SCH-18)): ESPHome-entiteit `sensor/soc`
+  (meest voorkomend bij Marstek B2500) leverde geen match in `NAME_MAP`, waardoor `bat_soc` nooit
+  werd uitgelezen. Opgelost door:
+  - Word-exact fallback in `_map_name`: als "soc" een los woord is in de entiteitnaam (bijv.
+    `sensor/soc`, `sensor/soc_1`), wordt het nu correct gemapt.
+  - Extra NAME_MAP-patronen: `laadstand`, `battery level`, `battery percent`.
+  - Nieuwe SOC-bron in `_live_soc`: HA state machine search op `device_class: battery` + SOC-
+    gerelateerde keywords in de entity_id (werkt ook zonder flow_cfg-configuratie).
+  - ESPHome direct poll-resultaat wordt nu gepersisteerd in `last_soc.json` zodat het volgende
+    strategie-run niet opnieuw hoeft te pollen.
+
 ## [1.19.83] - 2026-04-18
 
 ### Fixed

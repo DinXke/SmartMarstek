@@ -3434,6 +3434,39 @@ def _live_soc() -> float | None:
     except Exception:
         pass
 
+    # 1b. HA state machine search – device_class:battery sensors with SOC keywords
+    # Works even when bat_soc is not configured in flow_cfg as homeassistant source.
+    try:
+        _ha_s2 = _ha_effective_settings()
+        if _ha_s2.get("token") and _ha_s2.get("url"):
+            _r2 = _req.get(f"{_ha_s2['url']}/api/states",
+                           headers=_ha_headers(_ha_s2["token"]),
+                           timeout=5, verify=False)
+            if _r2.ok:
+                _soc_kw = {"soc", "laadniveau", "laadstand", "state_of_charge",
+                           "battery_soc", "bat_soc", "battery_level", "battery_percent",
+                           "marstek"}
+                _ha_socs = []
+                for _st in _r2.json():
+                    if _st.get("attributes", {}).get("device_class") != "battery":
+                        continue
+                    _eid = _st.get("entity_id", "").lower()
+                    if not any(_kw in _eid for _kw in _soc_kw):
+                        continue
+                    try:
+                        _v = float(_st.get("state", "nan"))
+                        if 0.0 <= _v <= 100.0:
+                            _ha_socs.append(_v)
+                    except (ValueError, TypeError):
+                        pass
+                if _ha_socs:
+                    soc = sum(_ha_socs) / len(_ha_socs)
+                    log.info("_live_soc: from HA state search (%d sensors): %.1f%%",
+                             len(_ha_socs), soc)
+                    return soc
+    except Exception:
+        pass
+
     # 2. last_soc.json (< 5 min old)
     try:
         _soc_file = os.path.join(DATA_DIR, "last_soc.json")
@@ -3454,6 +3487,13 @@ def _live_soc() -> float | None:
         if raw_socs:
             soc = sum(raw_socs) / len(raw_socs)
             log.debug("_live_soc: from ESPHome direct poll: %.1f%%", soc)
+            # Persist so step 2 can serve this value on the next call
+            try:
+                _soc_file3 = os.path.join(DATA_DIR, "last_soc.json")
+                with open(_soc_file3, "w", encoding="utf-8") as _sf3:
+                    json.dump({"soc": soc, "ts": time.time()}, _sf3)
+            except Exception:
+                pass
             return soc
     except Exception:
         pass

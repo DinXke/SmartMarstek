@@ -103,7 +103,10 @@ def _poll_esphome(devices: dict) -> dict:
         (["state", "charge"],   "soc"),
         (["battery", "soc"],    "soc"),
         (["bat", "soc"],        "soc"),
-        (["laadniveau"],        "soc"),   # Dutch ESPHome firmware
+        (["laadniveau"],        "soc"),   # Dutch: "laadniveau"
+        (["laadstand"],         "soc"),   # Dutch: "laadstand"
+        (["battery", "level"],  "soc"),   # "battery level"
+        (["battery", "percent"],"soc"),   # "battery percentage"
         (["battery", "power"],  "batPower"),
         (["bat", "power"],      "batPower"),
         (["ac", "power"],       "acPower"),
@@ -124,6 +127,10 @@ def _poll_esphome(devices: dict) -> dict:
         for terms, key in NAME_MAP:
             if all(t in name for t in terms):
                 return key
+        # Word-exact fallback: entity named just "soc" or "soc_1" etc.
+        # Uses word-boundary check to avoid matching "socket".
+        if "soc" in name.split():
+            return "soc"
         return None
 
     result = {}
