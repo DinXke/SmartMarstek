@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.19.89] - 2026-04-18
+
+### Accessibility
+- **Focus-visible ring** ([SCH-43](/SCH/issues/SCH-43)): globale `:focus-visible` ring toegevoegd
+  (`outline: 2px solid var(--accent); outline-offset: 2px`) zodat toetsenbordgebruikers altijd
+  zien welk element gefocust is. `outline: none` verwijderd uit invoer-/selectie-klassen;
+  muisgebruikers zien via `:focus:not(:focus-visible)` geen ring.
+- **aria-current navigatie** ([SCH-44](/SCH/issues/SCH-44)): `aria-current="page"` toegevoegd aan
+  de actieve navigatieknop zodat schermlezers de huidige pagina correct aankondigen.
+- **Contrast tekst-dim verhoogd (WCAG 1.4.3)** ([SCH-45](/SCH/issues/SCH-45)): `--text-dim`
+  contrastwaarden verhoogd naar ≥ 4.5:1 op alle thema's:
+  - Dark: `#64748b` → `#7e96b2` (~5.0:1 op `#0f172a`)
+  - Light: `#94a3b8` → `#64748b` (~4.5:1 op `#f8fafc`/wit)
+  - Matrix: `#007718` → `#009921` (~5.6:1 op zwart)
+
 ## [1.19.86] - 2026-04-18
 
 ### Added
