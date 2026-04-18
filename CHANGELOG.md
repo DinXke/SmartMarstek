@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.19.86] - 2026-04-18
+
+### Added
+- **Per-batterij min/max SoC** ([SCH-17](/SCH/issues/SCH-17)): elke Marstek-batterij kan nu een
+  eigen minimale en maximale SoC-instelling krijgen, los van de globale strategie-instellingen.
+  - In het apparatenbeheer (Instellingen → Apparaten) zijn de velden **Min SoC %** en
+    **Max SoC %** toegevoegd bij het toevoegen én bewerken van een apparaat.
+  - De huidige SoC-limieten worden zichtbaar getoond in de apparatenlijst (bijv. `SoC: 20%–90%`).
+  - **Grid charge**: bij meerdere batterijen met verschillende max SoC stuurt de automatisering
+    de juiste `Charge to SoC`-waarde *per apparaat* naar de Marstek ESPHome-interface.
+  - **Strategie-simulatie**: de effectieve SoC-grenzen (hoogste min, laagste max over alle
+    apparaten) worden automatisch in de plan-berekening geïnjecteerd. Hierdoor schat de
+    simulatie de batterij niet lager in dan de batterij in de praktijk daadwerkelijk gaat.
+  - Apparaten zonder per-apparaat instelling vallen terug op de globale strategie-instellingen.
+
 ## [1.19.85] - 2026-04-18
 
 ### Added

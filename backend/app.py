@@ -75,6 +75,24 @@ def save_devices(devices: dict) -> None:
         json.dump(devices, f, indent=2)
 
 
+def _effective_soc_limits(devices: dict, settings: dict) -> tuple[int, int]:
+    """Return (effective_min_soc_pct, effective_max_soc_pct) across all devices.
+
+    Per-device values override global settings. Uses the most conservative values:
+    highest min_soc (floor) and lowest max_soc (ceiling) across all devices.
+    Falls back to global strategy settings when no per-device override exists.
+    """
+    global_min = int(settings.get("min_reserve_soc", 10))
+    global_max = int(settings.get("max_soc",          95))
+
+    per_mins = [int(d["min_soc"]) for d in devices.values() if d.get("min_soc") is not None]
+    per_maxs = [int(d["max_soc"]) for d in devices.values() if d.get("max_soc") is not None]
+
+    eff_min = max(per_mins) if per_mins else global_min
+    eff_max = min(per_maxs) if per_maxs else global_max
+    return eff_min, eff_max
+
+
 # ---------------------------------------------------------------------------
 # ESPHome helpers
 # ---------------------------------------------------------------------------
@@ -126,9 +144,16 @@ def add_device():
     if not name or not ip:
         return jsonify({"error": "name and ip are required"}), 400
 
+    min_soc = body.get("min_soc")
+    max_soc = body.get("max_soc")
+
     devices = load_devices()
     device_id = str(uuid.uuid4())
     device = {"id": device_id, "name": name, "ip": ip, "port": port}
+    if min_soc is not None:
+        device["min_soc"] = int(min_soc)
+    if max_soc is not None:
+        device["max_soc"] = int(max_soc)
     devices[device_id] = device
     save_devices(devices)
     return jsonify(device), 201
@@ -148,6 +173,10 @@ def update_device(device_id):
         device["ip"] = body["ip"].strip()
     if "port" in body:
         device["port"] = int(body["port"])
+    if "min_soc" in body:
+        device["min_soc"] = int(body["min_soc"]) if body["min_soc"] is not None else None
+    if "max_soc" in body:
+        device["max_soc"] = int(body["max_soc"]) if body["max_soc"] is not None else None
 
     save_devices(devices)
     return jsonify(device)
@@ -3209,18 +3238,33 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
         log.info("_compute_forward_plan: Claude mode – %s (fp %s→%s)",
                  "forced refresh" if force_claude else "new prices",
                  _cached_fp or "none", _price_fp)
+        # Inject per-device effective SoC limits into settings before calling strategy
+        _dev_min, _dev_max = _effective_soc_limits(load_devices(), s)
+        s_eff = dict(s)
+        if _dev_min != int(s.get("min_reserve_soc", 10)) or _dev_max != int(s.get("max_soc", 95)):
+            s_eff["min_reserve_soc"] = _dev_min
+            s_eff["max_soc"]         = _dev_max
+            log.info("_compute_forward_plan: per-device SoC limits applied min=%d%% max=%d%%",
+                     _dev_min, _dev_max)
+        else:
+            s_eff = s
         try:
             import strategy_claude as _sc_mod
-            plan = _sc_mod.build_plan_claude(prices, solar_wh, consumption_by_hour, soc_now, s,
+            plan = _sc_mod.build_plan_claude(prices, solar_wh, consumption_by_hour, soc_now, s_eff,
                                               today_actuals=today_actuals)
             _claude_debug = _sc_mod.get_last_debug()
             log.info("_compute_forward_plan: Claude engine done  fallback=%s",
                      _claude_debug.get("fallback"))
         except Exception as _ce:
             log.warning("_compute_forward_plan: Claude engine failed (%s) — rule-based fallback", _ce)
-            plan = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s)
+            plan = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s_eff)
     else:
-        plan = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s)
+        _dev_min, _dev_max = _effective_soc_limits(load_devices(), s)
+        s_eff = dict(s)
+        if _dev_min != int(s.get("min_reserve_soc", 10)) or _dev_max != int(s.get("max_soc", 95)):
+            s_eff["min_reserve_soc"] = _dev_min
+            s_eff["max_soc"]         = _dev_max
+        plan = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s_eff)
     result = split_days(plan)
     result["consumption_by_hour"] = consumption_by_hour
     result["prices_available"]    = len(prices) > 0
@@ -3679,26 +3723,34 @@ def _automation_tick() -> None:
     # For grid_charge: also set Forcible Charge Power (W per battery) and Charge to SoC.
     # max_charge_kw is the total grid charge power across all batteries.
     # Divide evenly across devices; Marstek expects watts as an integer.
-    extra_commands: list[tuple] = []
+    # Per-device max_soc overrides global setting for Charge to SoC.
+    global_grid_charge_settings: dict = {}
     if action == "grid_charge":
         s_now      = load_strategy_settings()
         num_dev    = len(devices)
         total_w    = float(s_now.get("max_charge_kw", 3.0)) * 1000.0
         per_bat_w  = int(round(total_w / num_dev))
-        charge_soc = int(s_now.get("max_soc", 95))
-        extra_commands = [
-            ("number", "Marstek Forcible Charge Power",    str(per_bat_w)),
-            ("number", "Marstek Charge to SoC",            str(charge_soc)),
-        ]
-        log.info("Automation: grid_charge  total=%.1fkW  per_battery=%dW  charge_to_soc=%d%%  devices=%d",
-                 total_w / 1000, per_bat_w, charge_soc, num_dev)
-
-    commands = base_commands + extra_commands
+        global_charge_soc = int(s_now.get("max_soc", 95))
+        global_grid_charge_settings = {"per_bat_w": per_bat_w, "global_charge_soc": global_charge_soc}
+        log.info("Automation: grid_charge  total=%.1fkW  per_battery=%dW  global_charge_soc=%d%%  devices=%d",
+                 total_w / 1000, per_bat_w, global_charge_soc, num_dev)
 
     log.info("Automation: action changed %s → %s%s  (devices=%d)",
              prev_action or "none", effective_action,
              f" [override from {action}]" if override_reason else "", len(devices))
     for device_id, device in devices.items():
+        commands = list(base_commands)
+        if global_grid_charge_settings:
+            per_bat_w         = global_grid_charge_settings["per_bat_w"]
+            global_charge_soc = global_grid_charge_settings["global_charge_soc"]
+            dev_charge_soc    = int(device["max_soc"]) if device.get("max_soc") is not None else global_charge_soc
+            commands += [
+                ("number", "Marstek Forcible Charge Power", str(per_bat_w)),
+                ("number", "Marstek Charge to SoC",         str(dev_charge_soc)),
+            ]
+            if dev_charge_soc != global_charge_soc:
+                log.info("Automation: device %s  charge_to_soc=%d%% (per-device override)",
+                         device_id, dev_charge_soc)
         for domain, name, value in commands:
             result = send_esphome_command(device["ip"], device["port"], domain, name, value)
             if result.get("ok"):

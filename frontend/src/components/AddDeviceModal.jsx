@@ -4,6 +4,8 @@ export default function AddDeviceModal({ onClose, onAdded }) {
   const [name, setName] = useState("");
   const [ip, setIp] = useState("");
   const [port, setPort] = useState("80");
+  const [minSoc, setMinSoc] = useState("");
+  const [maxSoc, setMaxSoc] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -16,12 +18,16 @@ export default function AddDeviceModal({ onClose, onAdded }) {
       return;
     }
 
+    const body = { name: name.trim(), ip: ip.trim(), port: parseInt(port) || 80 };
+    if (minSoc !== "") body.min_soc = parseInt(minSoc);
+    if (maxSoc !== "") body.max_soc = parseInt(maxSoc);
+
     setSaving(true);
     try {
       const res = await fetch("api/devices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), ip: ip.trim(), port: parseInt(port) || 80 }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -78,6 +84,34 @@ export default function AddDeviceModal({ onClose, onAdded }) {
                 value={port}
                 onChange={(e) => setPort(e.target.value)}
               />
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <div className="form-group" style={{ flex: 1 }}>
+                <label className="form-label" htmlFor="dev-min-soc">Min SoC % <span style={{ fontWeight: 400, color: "var(--text-muted)" }}>(optioneel)</span></label>
+                <input
+                  id="dev-min-soc"
+                  className="form-input"
+                  type="number"
+                  min="0"
+                  max="50"
+                  placeholder="bijv. 15"
+                  value={minSoc}
+                  onChange={(e) => setMinSoc(e.target.value)}
+                />
+              </div>
+              <div className="form-group" style={{ flex: 1 }}>
+                <label className="form-label" htmlFor="dev-max-soc">Max SoC % <span style={{ fontWeight: 400, color: "var(--text-muted)" }}>(optioneel)</span></label>
+                <input
+                  id="dev-max-soc"
+                  className="form-input"
+                  type="number"
+                  min="50"
+                  max="100"
+                  placeholder="bijv. 95"
+                  value={maxSoc}
+                  onChange={(e) => setMaxSoc(e.target.value)}
+                />
+              </div>
             </div>
             {error && <div className="form-error">{error}</div>}
           </div>
