@@ -707,8 +707,13 @@ Plan grid_charge in de `uren_nodig` goedkoopste nachturen (00:00–05:00).
 - ❌ `solar_charge` bij negatieve of near-zero prijs (< 0.02 €/kWh) → `grid_charge`
 - ❌ `neutral` als doel is lading bewaren → gebruik `save`
 - ❌ `save` als soc_start_pct < min_reserve_soc_pct + 5% (geen lading te bewaren)
-- ❌ `save` als huidig uur buy_price ≥ p75 → dit is een discharge-uur, niet een spaarmomenten
+  → **Concreet voorbeeld**: SOC 16%, reserve 15% → slechts 1% boven reserve → `save` is zinloos, gebruik `neutral`
+  → `save` bevriest de batterij volledig; het net dekt alles. Met 1% boven reserve spaar je minder dan 0.1 kWh.
+  → Als de zon de volgende dag de batterij toch volledig herlaadt ongeacht het startniveau, maakt nacht-save nul verschil.
+- ❌ `save` als huidig uur buy_price ≥ p75 → dit is een discharge-uur, niet een spaarmoment
 - ❌ `save` langer dan 3 opeenvolgende uren wanneer er tussenin goedkope nachtlading mogelijk is
+- ❌ `save` meer dan 6 opeenvolgende nachtturen bij SOC < 25% EN morgen > 8 kWh zonverwachting
+  → Reden: de zon herlaadt toch; het enige effect van save is dat het net je nachtverbruik dekt (kosten!)
 - ❌ `grid_charge` als geen enkel toekomstig uur prijs > breakeven_eur_kwh heeft (verlieslatend)
 
 ---
@@ -1159,6 +1164,17 @@ def build_plan_claude(
             action = NEUTRAL
             _feasibility_overrides += 1
             log.debug("feasibility: %s grid_charge→neutral (bat=%.2fkWh)", key, _feas_bat)
+
+        # Save with virtually empty battery → neutral
+        # System prompt rule: ❌ save when soc < reserve + 5% — nothing meaningful to preserve.
+        # This also catches the "save all night at 16% SOC" pattern: with only 1% above reserve
+        # there is no charge worth preserving, and save costs money (grid covers all consumption).
+        elif action == SAVE and _feas_bat <= bat_min + cap_kwh * 0.05:
+            fixed = (NEUTRAL, f"[feasibility] save→neutral: SOC {_feas_bat / cap_kwh * 100:.0f}% ≤ reserve+5%, niets te bewaren")
+            plan_actions[key] = fixed
+            action = NEUTRAL
+            _feasibility_overrides += 1
+            log.debug("feasibility: %s save→neutral (bat=%.2fkWh ≤ min+5%%)", key, _feas_bat)
 
         # Advance simulated SOC for next iteration
         if action == GRID_CHARGE:

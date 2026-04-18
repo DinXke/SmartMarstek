@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.19.76] - 2026-04-18
+
+### Fixed
+- **Save bij lege batterij**: `save` wordt automatisch omgezet naar `neutral` wanneer de gesimuleerde
+  SOC ≤ `min_reserve + 5%`. Concreet geval: SOC 16% met reserve 15% → slechts 1% boven reserve →
+  `save` bevriest de batterij terwijl het net alles dekt, wat extra kosten oplevert zonder enig nut.
+  De zon herlaadt de batterij de volgende dag toch ongeacht of SOC 15% of 16% is als startpunt.
+- **Systeem-prompt aangescherpt**: twee extra `save`-verboden toegevoegd:
+  - `save` meer dan 6 achtereenvolgende nachtturen bij SOC < 25% én morgen > 8 kWh zonverwachting
+  - Concreet voorbeeld in prompt verduidelijkt waarom 1% boven reserve zinloos is om te bewaren
+
 ## [1.19.75] - 2026-04-18
 
 ### Changed
