@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.19.79] - 2026-04-18
+
+### Fixed
+- **Zonder-auto negatieve besparing** ([SCH-18](/SCH/issues/SCH-18)): energiebalans-afleiding
+  hield geen rekening met batterijvermogen. Correcte formule:
+  `house_w = solar_w + net_w − bat_w` (batterij opladen telt niet als huisverbruik).
+  `bat_w` wordt nu ook uitgelezen uit InfluxDB (multi-entry, gesommeerd per uur).
+  Zonder bat_w-mapping valt de code terug op `house_w = solar_w + net_w` met dezelfde
+  waarschuwing als voorheen.
+
 ## [1.19.78] - 2026-04-18
 
 ### Fixed

@@ -3927,58 +3927,71 @@ def _query_profit_day(date_str: str, tz_name: str) -> dict:
 
     result: dict[int, dict] = {}
 
-    for field_name in ("solar_w", "net_w", "house_w"):
-        mapping = mappings.get(field_name)
-        if not mapping:
+    # bat_w supports multiple entries (one per battery) — they are summed per hour.
+    # All other slots take the first entry only.
+    MULTI_SLOTS = {"bat_w"}
+
+    for field_name in ("solar_w", "net_w", "house_w", "bat_w"):
+        raw_mapping = mappings.get(field_name)
+        if not raw_mapping:
             continue
-        if isinstance(mapping, list):
-            mapping = mapping[0]
+        entries = raw_mapping if isinstance(raw_mapping, list) else [raw_mapping]
+        if field_name not in MULTI_SLOTS:
+            entries = entries[:1]
 
-        field   = mapping.get("field", "value")
-        meas    = mapping.get("measurement") or influx_src.get("measurement", "")
-        tag_key = mapping.get("tag_key", "")
-        tag_val = mapping.get("tag_value", "")
-        # "invert": true flips the sign — use when positive in InfluxDB means
-        # export/teruglevering instead of the standard positive=import convention.
-        sign    = -1.0 if mapping.get("invert", False) else 1.0
-        if not meas:
-            continue
+        for mapping in entries:
+            field   = mapping.get("field", "value")
+            meas    = mapping.get("measurement") or influx_src.get("measurement", "")
+            tag_key = mapping.get("tag_key", "")
+            tag_val = mapping.get("tag_value", "")
+            # "invert": true flips the sign (e.g. positive in InfluxDB means discharging)
+            sign    = -1.0 if mapping.get("invert", False) else 1.0
+            if not meas:
+                continue
 
-        where_parts = [f"time >= '{start}' AND time < '{end}'"]
-        if tag_key and tag_val:
-            where_parts.append(f'"{tag_key}" = \'{tag_val}\'')
+            where_parts = [f"time >= '{start}' AND time < '{end}'"]
+            if tag_key and tag_val:
+                where_parts.append(f'"{tag_key}" = \'{tag_val}\'')
 
-        q = (f'SELECT mean("{field}") AS val FROM "{meas}"'
-             f' WHERE {" AND ".join(where_parts)}'
-             f' GROUP BY time(1h) fill(null)')
-        try:
-            data = _influx_v1_query(url, username, password, q, db=database)
-            for res in data.get("results", []):
-                for series in res.get("series", []):
-                    for row in series.get("values", []):
-                        ts_raw, val = row[0], row[1]
-                        if val is None:
-                            continue
-                        try:
-                            dt_utc = _dt.strptime(ts_raw[:19], "%Y-%m-%dT%H:%M:%S").replace(
-                                tzinfo=_pytz.utc)
-                            dt_loc = dt_utc.astimezone(tz_obj)
-                            if dt_loc.strftime("%Y-%m-%d") == date_str:
-                                h = dt_loc.hour
-                                result.setdefault(h, {})[field_name] = sign * float(val)
-                        except Exception:
-                            pass
-        except Exception as exc:
-            log.debug("profit: influx query %s/%s %s: %s", field_name, meas, date_str, exc)
+            q = (f'SELECT mean("{field}") AS val FROM "{meas}"'
+                 f' WHERE {" AND ".join(where_parts)}'
+                 f' GROUP BY time(1h) fill(null)')
+            try:
+                data = _influx_v1_query(url, username, password, q, db=database)
+                for res in data.get("results", []):
+                    for series in res.get("series", []):
+                        for row in series.get("values", []):
+                            ts_raw, val = row[0], row[1]
+                            if val is None:
+                                continue
+                            try:
+                                dt_utc = _dt.strptime(ts_raw[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                                    tzinfo=_pytz.utc)
+                                dt_loc = dt_utc.astimezone(tz_obj)
+                                if dt_loc.strftime("%Y-%m-%d") == date_str:
+                                    h = dt_loc.hour
+                                    hd = result.setdefault(h, {})
+                                    # bat_w: sum multiple batteries; others: overwrite
+                                    if field_name in MULTI_SLOTS:
+                                        hd[field_name] = hd.get(field_name, 0.0) + sign * float(val)
+                                    else:
+                                        hd[field_name] = sign * float(val)
+                            except Exception:
+                                pass
+            except Exception as exc:
+                log.debug("profit: influx query %s/%s %s: %s", field_name, meas, date_str, exc)
 
-    # Derive any missing field from the other two (all three satisfy house = solar + net_import)
+    # Derive any missing field from available ones.
+    # Energy balance: solar + net_import = house + bat_charging  →  house = solar + net - bat
     for h, hd in result.items():
         if "net_w" not in hd and "solar_w" in hd and "house_w" in hd:
             hd["net_w"] = hd["house_w"] - hd["solar_w"]     # positive = importing
-        elif "house_w" not in hd and "solar_w" in hd and "net_w" in hd:
-            hd["house_w"] = hd["solar_w"] + hd["net_w"]     # house = solar + grid_import
-        elif "solar_w" not in hd and "house_w" in hd and "net_w" in hd:
-            hd["solar_w"] = hd["house_w"] - hd["net_w"]     # solar = house - grid_import
+        if "house_w" not in hd and "solar_w" in hd and "net_w" in hd:
+            bat = hd.get("bat_w", 0.0)
+            hd["house_w"] = hd["solar_w"] + hd["net_w"] - bat   # correct when bat_w mapped
+        if "solar_w" not in hd and "house_w" in hd and "net_w" in hd:
+            bat = hd.get("bat_w", 0.0)
+            hd["solar_w"] = hd["house_w"] - hd["net_w"] + bat
 
     return result
 
