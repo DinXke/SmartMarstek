@@ -85,8 +85,8 @@ DEFAULT_SETTINGS = {
     "strategy_mode":        "rule_based",
     # Anthropic API key (only used when strategy_mode = "claude")
     "claude_api_key":       "",
-    # Claude model to use for planning (Haiku = cheapest/fastest)
-    "claude_model":         "claude-haiku-4-5-20251001",
+    # Claude model to use for planning (Sonnet = recommended; Haiku = cheapest/fastest)
+    "claude_model":         "claude-sonnet-4-6",
 }
 
 

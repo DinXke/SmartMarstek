@@ -28,9 +28,26 @@ log = logging.getLogger("strategy_claude")
 
 WEEKDAY_NL = ["Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag", "Zaterdag", "Zondag"]
 
-# Haiku 4.5 pricing (USD per token, converted to EUR at 0.92)
-_PRICE_IN_EUR_PER_TOKEN  = 0.80 / 1_000_000 * 0.92   # $0.80/MTok input
-_PRICE_OUT_EUR_PER_TOKEN = 4.00 / 1_000_000 * 0.92   # $4.00/MTok output
+# Per-model pricing (USD per token, converted to EUR at 0.92)
+# Cache read tokens are 90% cheaper than uncached input tokens.
+_MODEL_PRICING = {
+    "claude-haiku-4-5-20251001": {"in": 0.80, "out": 4.00, "cache_write": 1.00, "cache_read": 0.08},
+    "claude-haiku-4-5":          {"in": 0.80, "out": 4.00, "cache_write": 1.00, "cache_read": 0.08},
+    "claude-sonnet-4-6":         {"in": 3.00, "out": 15.00, "cache_write": 3.75, "cache_read": 0.30},
+    "claude-opus-4-7":           {"in": 15.00, "out": 75.00, "cache_write": 18.75, "cache_read": 1.50},
+}
+_USD_TO_EUR = 0.92
+
+def _token_cost_eur(model: str, in_tok: int, out_tok: int,
+                    cache_write_tok: int = 0, cache_read_tok: int = 0) -> float:
+    p = _MODEL_PRICING.get(model, _MODEL_PRICING["claude-haiku-4-5-20251001"])
+    total_usd = (
+        in_tok          * p["in"]          / 1_000_000
+        + out_tok       * p["out"]         / 1_000_000
+        + cache_write_tok * p["cache_write"] / 1_000_000
+        + cache_read_tok  * p["cache_read"]  / 1_000_000
+    )
+    return total_usd * _USD_TO_EUR
 
 # ---------------------------------------------------------------------------
 # Usage ledger — persisted to /data/claude_usage.json
@@ -1039,9 +1056,14 @@ def build_plan_claude(
         response = client.messages.create(
             model=model,
             max_tokens=8192,
-            system=_SYSTEM_PROMPT,
+            temperature=0.1,
+            system=[{
+                "type": "text",
+                "text": _SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
             tools=[tool_def],
-            tool_choice={"type": "any"},
+            tool_choice={"type": "tool", "name": "submit_battery_plan"},
             messages=[{
                 "role":    "user",
                 "content": (
@@ -1106,6 +1128,64 @@ def build_plan_claude(
     if _override_count:
         log.info("strategy_claude: post-process overrode %d save→solar_charge (solar failsafe)",
                  _override_count)
+
+    # ── Feasibility pass: SOC forward-simulation to catch impossible actions ─
+    # Claude's SOC baseline in the prompt was a neutral-mode estimate; actual
+    # planned actions shift SOC differently. This corrects the most dangerous
+    # mismatches before execution.
+    _feasibility_overrides = 0
+    _feas_bat = bat_soc_now / 100.0 * cap_kwh
+    for slot_dt in all_slots:
+        key = slot_dt.isoformat()
+        if key not in plan_actions:
+            continue
+        action, reason = plan_actions[key]
+        solar_f = solar_by_slot.get(key, 0.0)
+        cons_f  = _cons(slot_dt.weekday(), slot_dt.hour)
+        net_f   = solar_f - cons_f
+
+        # Discharge impossible → save (prevents battery from going below reserve)
+        if action == DISCHARGE and _feas_bat <= bat_min + 0.2:
+            fixed = (SAVE, f"[feasibility] discharge→save: SOC {_feas_bat / cap_kwh * 100:.0f}% ≤ reserve")
+            plan_actions[key] = fixed
+            action = SAVE
+            _feasibility_overrides += 1
+            log.debug("feasibility: %s discharge→save (bat=%.2fkWh)", key, _feas_bat)
+
+        # Grid-charge when already full → neutral
+        elif action == GRID_CHARGE and _feas_bat >= bat_max - 0.05:
+            fixed = (NEUTRAL, f"[feasibility] grid_charge→neutral: SOC al {_feas_bat / cap_kwh * 100:.0f}%")
+            plan_actions[key] = fixed
+            action = NEUTRAL
+            _feasibility_overrides += 1
+            log.debug("feasibility: %s grid_charge→neutral (bat=%.2fkWh)", key, _feas_bat)
+
+        # Advance simulated SOC for next iteration
+        if action == GRID_CHARGE:
+            headroom = bat_max - _feas_bat
+            draw_kw  = min(max_charge_kw, headroom / rte if rte > 0 else 0)
+            if draw_kw > 0.05:
+                _feas_bat = min(bat_max, _feas_bat + draw_kw * rte)
+        elif action == SOLAR_CHARGE:
+            if net_f > 0:
+                _feas_bat = min(bat_max, _feas_bat + (net_f / 1000.0) * rte)
+        elif action == DISCHARGE:
+            avail = _feas_bat - bat_min
+            use   = min(cons_f / 1000.0, avail)
+            if use > 0.05:
+                _feas_bat -= use
+        elif action == NEUTRAL:
+            if net_f >= 0:
+                _feas_bat = min(bat_max, _feas_bat + (net_f / 1000.0) * rte)
+            else:
+                avail = _feas_bat - bat_min
+                use   = min((-net_f) / 1000.0, avail)
+                if use > 0:
+                    _feas_bat -= use
+        # SAVE: SOC unchanged
+
+    if _feasibility_overrides:
+        log.info("strategy_claude: feasibility pass overrode %d actions", _feasibility_overrides)
 
     if not plan_actions:
         log.warning("strategy_claude: no valid tool_use in response — falling back (%.1fs)", elapsed)
@@ -1212,9 +1292,11 @@ def build_plan_claude(
         })
 
     # ── Store debug info ──────────────────────────────────────────────────
-    _in_tok  = getattr(response.usage, "input_tokens",  0) or 0
-    _out_tok = getattr(response.usage, "output_tokens", 0) or 0
-    _eur     = _in_tok * _PRICE_IN_EUR_PER_TOKEN + _out_tok * _PRICE_OUT_EUR_PER_TOKEN
+    _in_tok          = getattr(response.usage, "input_tokens",          0) or 0
+    _out_tok         = getattr(response.usage, "output_tokens",         0) or 0
+    _cache_write_tok = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+    _cache_read_tok  = getattr(response.usage, "cache_read_input_tokens",     0) or 0
+    _eur     = _token_cost_eur(model, _in_tok, _out_tok, _cache_write_tok, _cache_read_tok)
     _ran_at  = datetime.now(timezone.utc).isoformat()
     _append_usage(_ran_at, model, _in_tok, _out_tok, _eur)
 
@@ -1231,6 +1313,8 @@ def build_plan_claude(
         elapsed_s=elapsed,
         input_tokens=_in_tok,
         output_tokens=_out_tok,
+        cache_write_tokens=_cache_write_tok,
+        cache_read_tokens=_cache_read_tok,
         cost_eur=round(_eur, 6),
         stop_reason=getattr(response, "stop_reason", None),
         slots_sent=len(slots_input),
@@ -1240,6 +1324,7 @@ def build_plan_claude(
         price_history_days=_history_days,
         soc_history_days=_soc_history_days,
         post_process_overrides=_override_count,
+        feasibility_overrides=_feasibility_overrides,
         price_stats={
             "p25":    round(p25,    4),
             "median": round(median, 4),

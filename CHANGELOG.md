@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.19.75] - 2026-04-18
+
+### Changed
+- **Claude-strategie: upgrade naar Sonnet** — standaard model gewijzigd van `claude-haiku-4-5-20251001`
+  naar `claude-sonnet-4-6`. Sonnet heeft significant betere redeneerdiepte voor de 3-pass globale
+  optimalisatie over 48 slots. Haiku blijft beschikbaar als handmatige keuze in de strategie-instellingen.
+- **Prompt caching** — systeem-prompt (~2.000 tokens) wordt nu gecached via `cache_control: ephemeral`.
+  Op de tweede en volgende dagelijkse planningsrun zijn de cached input-tokens 90% goedkoper
+  ($0.30/MTok i.p.v. $3.00/MTok voor Sonnet). Cache-statistieken zichtbaar in debug-panel.
+- **Deterministische output** — `temperature=0.1` toegevoegd. Dezelfde invoer levert nu consistent
+  hetzelfde plan, zonder willekeurige variatie die bij financiële optimalisatie ongewenst is.
+- **tool_choice aangescherpt** — `{"type": "any"}` → `{"type": "tool", "name": "submit_battery_plan"}`.
+  Voorkomt dat Claude een andere tool zou kiezen en zorg voor directe plan-output.
+- **Per-model prijstabel** — token-kostberekening ondersteunt nu Haiku 4.5, Sonnet 4.6 en Opus 4.7
+  met correcte cache-write en cache-read tarieven per model.
+
+### Fixed
+- **Feasibility-pass na Claude** — na ontvangst van Claude's plan wordt de SOC nu forward-gesimuleerd
+  over alle 48 slots. Onmogelijke acties (discharge bij SOC ≤ reserve; grid_charge bij volle batterij)
+  worden automatisch gecorrigeerd naar `save` resp. `neutral` met een `[feasibility]`-prefix in de reden.
+  Aantal correcties wordt gelogd en zichtbaar in het debug-panel (`feasibility_overrides`).
+
 ## [1.19.74] - 2026-04-07
 
 ### Fixed
