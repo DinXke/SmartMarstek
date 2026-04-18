@@ -3144,6 +3144,18 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
                     log.info("_compute_forward_plan: SoC from local InfluxDB: %.1f%%", soc)
             except Exception:
                 pass
+        # Stale last_soc.json fallback (up to 1 hour) — better than hardcoded 50%
+        if soc is None:
+            try:
+                _soc_f = os.path.join(DATA_DIR, "last_soc.json")
+                with open(_soc_f, encoding="utf-8") as _sf:
+                    _sc = json.load(_sf)
+                _age = time.time() - _sc.get("ts", 0)
+                if _age < 3600:
+                    soc = float(_sc["soc"])
+                    log.warning("_compute_forward_plan: SoC from stale last_soc.json (%.0fs oud): %.1f%%", _age, soc)
+            except Exception:
+                pass
         if soc is None:
             log.warning("_compute_forward_plan: SoC onbekend uit alle bronnen – fallback 50%%")
         return soc if soc is not None else 50.0
@@ -3427,10 +3439,12 @@ def _live_soc() -> float | None:
         _soc_file = os.path.join(DATA_DIR, "last_soc.json")
         with open(_soc_file, encoding="utf-8") as _f:
             _sc = json.load(_f)
-        if time.time() - _sc.get("ts", 0) < 300:
+        _age_s = time.time() - _sc.get("ts", 0)
+        if _age_s < 300:
             return float(_sc["soc"])
-    except Exception:
-        pass
+        log.debug("_live_soc: last_soc.json te oud (%.0fs)", _age_s)
+    except Exception as _e:
+        log.debug("_live_soc: last_soc.json niet leesbaar: %s", _e)
 
     # 3. ESPHome direct SSE poll (no flow_cfg needed; Dutch entity names now supported)
     try:

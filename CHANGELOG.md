@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.19.83] - 2026-04-18
+
+### Fixed
+- **SOC-fallback 50% bij tijdelijk onbereikbare ESPHome** ([SCH-18](/SCH/issues/SCH-18)): als alle
+  live bronnen (HA-sensoren, ESPHome SSE-poll, lokale InfluxDB) geen SOC konden leveren, viel de
+  strategie altijd terug op 50%. Nu wordt `last_soc.json` nog gebruikt als het bestand maximaal
+  1 uur oud is — zodat een korte verbindingsonderbreking niet tot een foute SOC van 50% leidt.
+- **Debug-logging `_live_soc`**: wanneer `last_soc.json` te oud of onleesbaar is, wordt dit nu
+  gelogd op DEBUG-niveau zodat de oorzaak makkelijker te traceren is.
+
 ## [1.19.82] - 2026-04-18
 
 ### Fixed
