@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.19.90] - 2026-04-19
+
+### Fixed
+- **SoC verkeerd in strategie bij ESPHome-batterijen** ([SCH-70](/SCH/issues/SCH-70)): de
+  HA state machine search (toegevoegd in v1.19.84) werd uitgevoerd vóór `last_soc.json`
+  en de ESPHome-directpoll. Wanneer een Marstek HA-integratie een gecombineerde
+  SoC-sensor aanmaakt die de twee batterijen optelt (i.p.v. gemiddelt), retourneerde
+  `_live_soc()` steeds deze verkeerde waarde. Opgelost door:
+  - HA state search verplaatst naar de **laatste positie** (na last_soc.json en ESPHome).
+  - HA state search wordt **overgeslagen** als `bat_soc` al geconfigureerd is in flow_cfg
+    (ESPHome of HA-bron): geconfigureerde bronnen zijn altijd leidend.
+
 ## [1.19.89] - 2026-04-18
 
 ### Accessibility

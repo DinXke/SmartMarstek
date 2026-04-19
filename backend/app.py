@@ -3149,7 +3149,7 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
 
     def _do_soc():
         # Simply reuse _live_soc() which tries all sources in order:
-        # last_soc.json → flow-slot poll (ESPHome+HA) → ESPHome direct.
+        # HA configured → last_soc.json → ESPHome direct → HA state search.
         # Then fall back to InfluxDB queries if that also returns None.
         soc = _live_soc()
         if soc is not None:
@@ -3457,17 +3457,25 @@ def _solar_overproduction_w() -> float | None:
 def _live_soc() -> float | None:
     """Return the most recent battery SOC, trying multiple sources in priority order.
 
-    1. Home Assistant sensor(s) configured in flow_cfg bat_soc – always cached in HA
-    2. last_soc.json  – written every ~30 s by the data collector
+    1. Home Assistant sensor(s) configured in flow_cfg bat_soc
+    2. last_soc.json  – written every ~30 s by the data collector (averaged)
     3. ESPHome direct poll via SSE – works even when bat_soc not in flow_cfg
+    4. HA state machine search – only when no bat_soc sources are configured
     """
-    # 1. HA sources configured in flow_cfg (highest priority – always cached in HA)
+    # Read flow_cfg once so paths 1 and 4 can use it.
+    live_cfg: dict = {}
     try:
-        live_cfg: dict = {}
         with open(FLOW_CFG_SERVER_FILE, "r", encoding="utf-8") as _f:
             raw = json.load(_f)
         for k, v in raw.items():
             live_cfg[k] = v if isinstance(v, list) else [v]
+    except Exception:
+        pass
+
+    bat_soc_configured = bool(live_cfg.get("bat_soc"))
+
+    # 1. HA sources configured in flow_cfg (highest priority – always cached in HA)
+    try:
         ha_entries = [e for e in live_cfg.get("bat_soc", [])
                       if e.get("source") == "homeassistant" and e.get("sensor")]
         if ha_entries:
@@ -3490,40 +3498,7 @@ def _live_soc() -> float | None:
     except Exception:
         pass
 
-    # 1b. HA state machine search – device_class:battery sensors with SOC keywords
-    # Works even when bat_soc is not configured in flow_cfg as homeassistant source.
-    try:
-        _ha_s2 = _ha_effective_settings()
-        if _ha_s2.get("token") and _ha_s2.get("url"):
-            _r2 = _req.get(f"{_ha_s2['url']}/api/states",
-                           headers=_ha_headers(_ha_s2["token"]),
-                           timeout=5, verify=False)
-            if _r2.ok:
-                _soc_kw = {"soc", "laadniveau", "laadstand", "state_of_charge",
-                           "battery_soc", "bat_soc", "battery_level", "battery_percent",
-                           "marstek"}
-                _ha_socs = []
-                for _st in _r2.json():
-                    if _st.get("attributes", {}).get("device_class") != "battery":
-                        continue
-                    _eid = _st.get("entity_id", "").lower()
-                    if not any(_kw in _eid for _kw in _soc_kw):
-                        continue
-                    try:
-                        _v = float(_st.get("state", "nan"))
-                        if 0.0 <= _v <= 100.0:
-                            _ha_socs.append(_v)
-                    except (ValueError, TypeError):
-                        pass
-                if _ha_socs:
-                    soc = sum(_ha_socs) / len(_ha_socs)
-                    log.info("_live_soc: from HA state search (%d sensors): %.1f%%",
-                             len(_ha_socs), soc)
-                    return soc
-    except Exception:
-        pass
-
-    # 2. last_soc.json (< 5 min old)
+    # 2. last_soc.json (< 5 min old) – written by _collect_and_write with correct averaging
     try:
         _soc_file = os.path.join(DATA_DIR, "last_soc.json")
         with open(_soc_file, encoding="utf-8") as _f:
@@ -3553,6 +3528,41 @@ def _live_soc() -> float | None:
             return soc
     except Exception:
         pass
+
+    # 4. HA state machine search – last resort, only when bat_soc is not configured.
+    # Skipped when sources are configured to avoid picking up combined/aggregated
+    # HA sensors (e.g. a Marstek integration sensor that sums both batteries).
+    if not bat_soc_configured:
+        try:
+            _ha_s2 = _ha_effective_settings()
+            if _ha_s2.get("token") and _ha_s2.get("url"):
+                _r2 = _req.get(f"{_ha_s2['url']}/api/states",
+                               headers=_ha_headers(_ha_s2["token"]),
+                               timeout=5, verify=False)
+                if _r2.ok:
+                    _soc_kw = {"soc", "laadniveau", "laadstand", "state_of_charge",
+                               "battery_soc", "bat_soc", "battery_level", "battery_percent",
+                               "marstek"}
+                    _ha_socs = []
+                    for _st in _r2.json():
+                        if _st.get("attributes", {}).get("device_class") != "battery":
+                            continue
+                        _eid = _st.get("entity_id", "").lower()
+                        if not any(_kw in _eid for _kw in _soc_kw):
+                            continue
+                        try:
+                            _v = float(_st.get("state", "nan"))
+                            if 0.0 <= _v <= 100.0:
+                                _ha_socs.append(_v)
+                        except (ValueError, TypeError):
+                            pass
+                    if _ha_socs:
+                        soc = sum(_ha_socs) / len(_ha_socs)
+                        log.info("_live_soc: from HA state search (%d sensors): %.1f%%",
+                                 len(_ha_socs), soc)
+                        return soc
+        except Exception:
+            pass
 
     return None
 
