@@ -1,6 +1,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Home%20Assistant-Add--on-41BDF5?logo=homeassistant&logoColor=white" />
-  <img src="https://img.shields.io/badge/version-1.24.0-blue" />
+  <img src="https://img.shields.io/badge/version-1.24.1-blue" />
   <img src="https://img.shields.io/badge/python-3.13-blue?logo=python&logoColor=white" />
   <img src="https://img.shields.io/badge/react-18-61DAFB?logo=react&logoColor=white" />
   <img src="https://img.shields.io/badge/license-MIT-green" />
