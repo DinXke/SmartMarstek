@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.24.2] - 2026-04-19
+
+### Fixed
+- **Strategie-tab blijft functioneel bij berekeningsfouten** ([SCH-94](/SCH/issues/SCH-94)):
+  `GET /api/strategy/plan` geeft nu bij een berekeningsfout het gecachte plan terug met
+  `"stale": true` en `"stale_reason": "..."` — de UI blijft functioneel in plaats van
+  een HTML 500-pagina te tonen. Als er geen cache beschikbaar is, volgt een leesbare
+  JSON-fout (`{"error": "..."}`) met HTTP 500.
+  - Historisch pad (`is_historical=true`) geeft nu ook een JSON 500 i.p.v. HTML bij fouten.
+  - Consumptie-querymethoden voorzien van eigen try/except zodat InfluxDB/HA-fouten
+    niet escaleren naar de route.
+
 ## [1.19.92] - 2026-04-19
 
 ### Added

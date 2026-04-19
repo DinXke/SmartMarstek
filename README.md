@@ -103,6 +103,7 @@ Gebruikt het Anthropic Claude Haiku model als intelligente planningsagent:
 - Kleurcodering per actie (oranje = zonneladen, rood = netwerkladen, blauw = sparen, groen = ontladen)
 - Historische dagweergave met overlay van werkelijke metingen
 - Uitklapbaar per uur: prijs, actie, reden, SOC start/einde
+- **Fout-resilientie:** als de berekening mislukt toont de pagina het laatste gecachte plan met een "verouderd plan"-indicatie. Alleen als er nog nooit een plan is berekend verschijnt een foutmelding.
 
 ### Winstanalyse
 - Dagelijkse vergelijking: kosten mét vs zonder automatisering
@@ -395,6 +396,7 @@ Uses the Anthropic Claude Haiku model as an intelligent planning agent:
 - Colour-coded actions (orange = solar charge, red = grid charge, blue = save, green = discharge)
 - Historical day view with overlay of actual measurements
 - Expandable per hour: price, action, reason, SOC start/end
+- **Fault resilience:** if calculation fails, the page shows the last cached plan with a "stale plan" indicator. A plain error message appears only when no plan has ever been calculated.
 
 ### Profit Analysis
 - Daily comparison: costs with vs without automation
