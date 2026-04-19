@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.19.91] - 2026-04-19
+
+### Fixed
+- **SoC verkeerd in strategie — verbeterde bronvolgorde** ([SCH-70](/SCH/issues/SCH-70)):
+  v1.19.90 loste de som-bug op maar introduceerde een regressie: als `bat_soc` via ESPHome
+  geconfigureerd is (niet via HA), sloeg het systeem path 1 over, gebruikte een verouderde
+  `last_soc.json` (bijv. nog 50% terwijl de batterijen al op 30% staan), en viel terug op
+  de 50%-fallback. Opgelost met een herziene prioriteitsvolgorde in `_live_soc()`:
+  1. Geconfigureerde HA-bronnen (pad 1 – ongewijzigd, snel via HA-cache)
+  2. **Geconfigureerde ESPHome-bronnen** (pad 2 – nieuw, pollt configured sensors direct)
+  3. `last_soc.json` < 5 min oud (pad 3)
+  4. ESPHome directpoll van alle apparaten (pad 4)
+  5. HA state machine search (pad 5 – laatste redmiddel, geen guard meer)
+
+  Geconfigureerde bronnen worden nu altijd vóór de cache en vóór de HA-zoekfunctie
+  geprobeerd, zodat de strategie altijd de actuele SoC krijgt zolang de batterijen
+  bereikbaar zijn.
+
 ## [1.19.90] - 2026-04-19
 
 ### Fixed

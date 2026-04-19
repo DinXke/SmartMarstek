@@ -3457,12 +3457,13 @@ def _solar_overproduction_w() -> float | None:
 def _live_soc() -> float | None:
     """Return the most recent battery SOC, trying multiple sources in priority order.
 
-    1. Home Assistant sensor(s) configured in flow_cfg bat_soc
-    2. last_soc.json  – written every ~30 s by the data collector (averaged)
-    3. ESPHome direct poll via SSE – works even when bat_soc not in flow_cfg
-    4. HA state machine search – only when no bat_soc sources are configured
+    1. HA sensor(s) configured in flow_cfg bat_soc
+    2. ESPHome sensor(s) configured in flow_cfg bat_soc  (averaged)
+    3. last_soc.json  – written every ~30 s by the data collector
+    4. ESPHome direct poll of all configured devices
+    5. HA state machine search – last resort, no flow_cfg required
     """
-    # Read flow_cfg once so paths 1 and 4 can use it.
+    # Read flow_cfg once; reused by paths 1, 2, and for persisting results.
     live_cfg: dict = {}
     try:
         with open(FLOW_CFG_SERVER_FILE, "r", encoding="utf-8") as _f:
@@ -3471,8 +3472,6 @@ def _live_soc() -> float | None:
             live_cfg[k] = v if isinstance(v, list) else [v]
     except Exception:
         pass
-
-    bat_soc_configured = bool(live_cfg.get("bat_soc"))
 
     # 1. HA sources configured in flow_cfg (highest priority – always cached in HA)
     try:
@@ -3498,7 +3497,29 @@ def _live_soc() -> float | None:
     except Exception:
         pass
 
-    # 2. last_soc.json (< 5 min old) – written by _collect_and_write with correct averaging
+    # 2. ESPHome sources configured in flow_cfg.
+    # Polled before last_soc.json so we always get a fresh value when the batteries
+    # are reachable, avoiding stale cache hits that return an old SoC percentage.
+    try:
+        esp_entries = [e for e in live_cfg.get("bat_soc", [])
+                       if e.get("source") == "esphome" and e.get("device_id")]
+        if esp_entries:
+            from influx_writer import _poll_esphome as _pe2
+            _esp_map2 = _pe2(load_devices())
+            socs = []
+            for e in esp_entries:
+                v = _esp_map2.get(e.get("device_id"), {}).get(e.get("sensor"))
+                if v is not None:
+                    socs.append(float(v))
+            if socs:
+                soc = sum(socs) / len(socs)
+                log.debug("_live_soc: from ESPHome configured sources (%d): %.1f%%",
+                          len(socs), soc)
+                return soc
+    except Exception:
+        pass
+
+    # 3. last_soc.json (< 5 min old) – written by _collect_and_write with correct averaging
     try:
         _soc_file = os.path.join(DATA_DIR, "last_soc.json")
         with open(_soc_file, encoding="utf-8") as _f:
@@ -3510,7 +3531,7 @@ def _live_soc() -> float | None:
     except Exception as _e:
         log.debug("_live_soc: last_soc.json niet leesbaar: %s", _e)
 
-    # 3. ESPHome direct SSE poll (no flow_cfg needed; Dutch entity names now supported)
+    # 4. ESPHome direct SSE poll of all configured devices (no flow_cfg mapping needed)
     try:
         from influx_writer import _poll_esphome
         esphome_map = _poll_esphome(load_devices())
@@ -3518,7 +3539,6 @@ def _live_soc() -> float | None:
         if raw_socs:
             soc = sum(raw_socs) / len(raw_socs)
             log.debug("_live_soc: from ESPHome direct poll: %.1f%%", soc)
-            # Persist so step 2 can serve this value on the next call
             try:
                 _soc_file3 = os.path.join(DATA_DIR, "last_soc.json")
                 with open(_soc_file3, "w", encoding="utf-8") as _sf3:
@@ -3529,40 +3549,39 @@ def _live_soc() -> float | None:
     except Exception:
         pass
 
-    # 4. HA state machine search – last resort, only when bat_soc is not configured.
-    # Skipped when sources are configured to avoid picking up combined/aggregated
-    # HA sensors (e.g. a Marstek integration sensor that sums both batteries).
-    if not bat_soc_configured:
-        try:
-            _ha_s2 = _ha_effective_settings()
-            if _ha_s2.get("token") and _ha_s2.get("url"):
-                _r2 = _req.get(f"{_ha_s2['url']}/api/states",
-                               headers=_ha_headers(_ha_s2["token"]),
-                               timeout=5, verify=False)
-                if _r2.ok:
-                    _soc_kw = {"soc", "laadniveau", "laadstand", "state_of_charge",
-                               "battery_soc", "bat_soc", "battery_level", "battery_percent",
-                               "marstek"}
-                    _ha_socs = []
-                    for _st in _r2.json():
-                        if _st.get("attributes", {}).get("device_class") != "battery":
-                            continue
-                        _eid = _st.get("entity_id", "").lower()
-                        if not any(_kw in _eid for _kw in _soc_kw):
-                            continue
-                        try:
-                            _v = float(_st.get("state", "nan"))
-                            if 0.0 <= _v <= 100.0:
-                                _ha_socs.append(_v)
-                        except (ValueError, TypeError):
-                            pass
-                    if _ha_socs:
-                        soc = sum(_ha_socs) / len(_ha_socs)
-                        log.info("_live_soc: from HA state search (%d sensors): %.1f%%",
-                                 len(_ha_socs), soc)
-                        return soc
-        except Exception:
-            pass
+    # 5. HA state machine search – last resort, works without flow_cfg configuration.
+    # Placed last so configured sources and direct polls always take precedence,
+    # preventing combined/aggregated HA sensors from overriding correct per-battery values.
+    try:
+        _ha_s2 = _ha_effective_settings()
+        if _ha_s2.get("token") and _ha_s2.get("url"):
+            _r2 = _req.get(f"{_ha_s2['url']}/api/states",
+                           headers=_ha_headers(_ha_s2["token"]),
+                           timeout=5, verify=False)
+            if _r2.ok:
+                _soc_kw = {"soc", "laadniveau", "laadstand", "state_of_charge",
+                           "battery_soc", "bat_soc", "battery_level", "battery_percent",
+                           "marstek"}
+                _ha_socs = []
+                for _st in _r2.json():
+                    if _st.get("attributes", {}).get("device_class") != "battery":
+                        continue
+                    _eid = _st.get("entity_id", "").lower()
+                    if not any(_kw in _eid for _kw in _soc_kw):
+                        continue
+                    try:
+                        _v = float(_st.get("state", "nan"))
+                        if 0.0 <= _v <= 100.0:
+                            _ha_socs.append(_v)
+                    except (ValueError, TypeError):
+                        pass
+                if _ha_socs:
+                    soc = sum(_ha_socs) / len(_ha_socs)
+                    log.info("_live_soc: from HA state search (%d sensors): %.1f%%",
+                             len(_ha_socs), soc)
+                    return soc
+    except Exception:
+        pass
 
     return None
 
