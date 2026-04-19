@@ -8,6 +8,7 @@ import InfluxSettings from "./InfluxSettings.jsx";
 import FlowSourcesSettings from "./FlowSourcesSettings.jsx";
 import PvLimiterSettings from "./PvLimiterSettings.jsx";
 import CapTariffSettings from "./CapTariffSettings.jsx";
+import TelegramSettings from "./TelegramSettings.jsx";
 
 // ---------------------------------------------------------------------------
 // Persisted settings helpers (localStorage)
@@ -394,6 +395,7 @@ const TABS = [
   { id: "zon",       label: "☀️ Zon"       },
   { id: "strategie", label: "🧠 Strategie" },
   { id: "data",      label: "🗄️ Data"      },
+  { id: "telegram",  label: "✈️ Telegram"  },
   { id: "debug",     label: "🛠️ Debug"     },
 ];
 
@@ -451,6 +453,8 @@ export default function SettingsPage({ devices, powerMap, onDeviceAdded, onDevic
           <HomeWizardSettings />
         </>
       )}
+
+      {tab === "telegram" && <TelegramSettings />}
 
       {tab === "debug" && <DebugPanel />}
     </div>

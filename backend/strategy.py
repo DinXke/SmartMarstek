@@ -97,6 +97,17 @@ DEFAULT_SETTINGS = {
     "neg_price_discharge_enabled": True,
     "neg_price_lookahead_h":       4,    # uren vooruitkijken voor negatieve prijs
     "neg_price_threshold_ct":      0.0,  # ct/kWh: prijs < dit = negatief (0 = alleen echt negatief)
+    # Telegram-notificaties via CommunicationAgent
+    "telegram_enabled":            False,
+    "telegram_chat_id":            "",
+    "telegram_events": {
+        "plan_ready":             True,
+        "grid_charge_opportunity": True,
+        "esphome_failed":         True,
+        "daily_summary":          True,
+    },
+    "telegram_grid_price_threshold": 0.10,  # €/kWh: grid_charge_opportunity als prijs < dit
+    "telegram_grid_soc_threshold":   80,    # %: grid_charge_opportunity als SoC < dit
 }
 
 

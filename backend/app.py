@@ -16,6 +16,7 @@ from influx_writer import (start_background_writer, query_avg_hourly_consumption
 from rte_calculator import measure_rte as _measure_rte
 from strategy import (load_strategy_settings, save_strategy_settings,
                       build_plan, split_days)
+from telegram import notify_event as _tg_notify, resolve_approval, get_pending_approvals
 
 import requests as _req  # aliased to avoid clash with flask.request
 import urllib3
@@ -1994,6 +1995,30 @@ def post_strategy_settings():
     return jsonify(save_strategy_settings(body))
 
 
+# ---------------------------------------------------------------------------
+# Telegram callback endpoint
+# ---------------------------------------------------------------------------
+
+@app.route("/api/telegram/callback", methods=["POST"])
+def telegram_callback():
+    body        = request.get_json(force=True) or {}
+    approval_id = (body.get("approval_id") or "").strip()
+    action      = (body.get("action") or "").strip()
+
+    if not approval_id or not action:
+        return jsonify({"error": "approval_id and action are required"}), 400
+
+    result = resolve_approval(approval_id, action)
+    if not result.get("ok"):
+        return jsonify(result), 404 if "not found" in result.get("error", "") else 400
+    return jsonify(result)
+
+
+@app.route("/api/telegram/approvals", methods=["GET"])
+def telegram_approvals():
+    return jsonify(get_pending_approvals())
+
+
 def _query_ha_hourly_consumption(days: int = 21) -> list[dict]:
     """
     Fallback consumption profile from HA history when InfluxDB data is sparse.
@@ -3401,6 +3426,19 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
     _plan_cache["result"]            = result
     _plan_cache["price_fingerprint"] = _price_fp
     _persist_plan_cache()
+
+    try:
+        today_slots = result.get("today", [])
+        _tg_notify("plan_ready", {
+            "slots_today": len(today_slots),
+            "grid_charge_hours": sum(1 for sl in today_slots if sl.get("action") == "grid_charge"),
+            "discharge_hours":   sum(1 for sl in today_slots if sl.get("action") == "discharge"),
+            "soc_now":           soc_now,
+            "engine":            s.get("strategy_mode", "rule_based"),
+        })
+    except Exception as _tge:
+        log.debug("plan_ready telegram notify failed: %s", _tge)
+
     return result
 
 
@@ -3910,6 +3948,7 @@ def _automation_tick() -> None:
             if dev_charge_soc != global_charge_soc:
                 log.info("Automation: device %s  charge_to_soc=%d%% (per-device override)",
                          device_id, dev_charge_soc)
+        esphome_failed_sent = False
         for domain, name, value in commands:
             result = send_esphome_command(device["ip"], device["port"], domain, name, value)
             if result.get("ok"):
@@ -3917,6 +3956,45 @@ def _automation_tick() -> None:
             else:
                 log.warning("Automation: ✗ %s → %s=%s  (device %s): %s",
                             effective_action, name, value, device_id, result.get("error"))
+                if not esphome_failed_sent:
+                    esphome_failed_sent = True
+                    try:
+                        _tg_notify("esphome_failed", {
+                            "device_id":   device_id,
+                            "device_name": device.get("name", device_id),
+                            "entity":      name,
+                            "error":       result.get("error", "unknown"),
+                        }, settings=s_now)
+                    except Exception as _tge:
+                        log.debug("esphome_failed telegram notify failed: %s", _tge)
+
+    # ── grid_charge_opportunity Telegram notification ─────────────────────────
+    if effective_action == "grid_charge" and action == "grid_charge":
+        _soc_vals = _read_live_flow_slots("bat_soc")
+        _live_soc = _soc_vals.get("bat_soc")
+        _gc_thresh = float(s_now.get("telegram_grid_price_threshold", 0.10))
+        _soc_thresh = float(s_now.get("telegram_grid_soc_threshold", 80))
+        _current_price: float | None = None
+        try:
+            _slots = _plan_cache.get("slots", [])
+            _tz    = ZoneInfo(_entsoe_settings().get("timezone", "Europe/Brussels"))
+            _now_h = datetime.now(_tz).hour
+            _slot  = next((sl for sl in _slots if sl.get("hour") == _now_h), None)
+            if _slot:
+                _current_price = _slot.get("price_eur_kwh")
+        except Exception:
+            pass
+        _soc_ok    = _live_soc is None or _live_soc < _soc_thresh
+        _price_ok  = _current_price is None or _current_price < _gc_thresh
+        if _soc_ok and _price_ok:
+            try:
+                _tg_notify("grid_charge_opportunity", {
+                    "price_eur_kwh":      _current_price,
+                    "soc":                _live_soc,
+                    "recommended_kwh":    round(float(s_now.get("max_charge_kw", 3.0)), 2),
+                }, requires_approval=True, settings=s_now)
+            except Exception as _tge:
+                log.debug("grid_charge_opportunity telegram notify failed: %s", _tge)
 
     auto["last_action"]    = effective_action   # what was actually sent to devices
     auto["planned_action"] = action             # what the strategy intended
@@ -4116,6 +4194,37 @@ def _pv_limiter_tick() -> None:
     _save_automation(auto)
 
 
+_daily_summary_sent_date: str = ""
+
+
+def _maybe_send_daily_summary() -> None:
+    """Send a daily_summary Telegram notification once per day around 08:00."""
+    global _daily_summary_sent_date
+    s = load_strategy_settings()
+    if not s.get("telegram_enabled", False):
+        return
+    tz_name  = s.get("timezone", "Europe/Brussels")
+    now_local = datetime.now(ZoneInfo(tz_name))
+    today_str = now_local.strftime("%Y-%m-%d")
+    if now_local.hour < 8:
+        return
+    if _daily_summary_sent_date == today_str:
+        return
+    _daily_summary_sent_date = today_str
+    try:
+        slots = _plan_cache.get("slots", [])
+        today_slots = [sl for sl in slots if sl.get("day") == "today"] or slots[:24]
+        _tg_notify("daily_summary", {
+            "date":               today_str,
+            "grid_charge_hours":  sum(1 for sl in today_slots if sl.get("action") == "grid_charge"),
+            "discharge_hours":    sum(1 for sl in today_slots if sl.get("action") == "discharge"),
+            "solar_charge_hours": sum(1 for sl in today_slots if sl.get("action") == "solar_charge"),
+            "soc_now":            _plan_cache.get("result", {}).get("soc_now"),
+        }, settings=s)
+    except Exception as exc:
+        log.debug("daily_summary telegram notify failed: %s", exc)
+
+
 def _start_automation_thread(interval: int = 60) -> None:
     import threading
 
@@ -4126,6 +4235,10 @@ def _start_automation_thread(interval: int = 60) -> None:
                 _automation_tick()
             except Exception as exc:
                 log.warning("Automation thread error: %s", exc)
+            try:
+                _maybe_send_daily_summary()
+            except Exception as exc:
+                log.debug("daily summary check error: %s", exc)
             _time.sleep(interval)
 
     def pv_loop():
