@@ -1,6 +1,6 @@
 {
   "name": "marstek-dashboard",
-  "version": "1.24.3",
+  "version": "1.24.4",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -15,7 +15,7 @@ from influx_writer import (start_background_writer, query_avg_hourly_consumption
                            query_hourly_import_export_kwh)
 from rte_calculator import measure_rte as _measure_rte
 from strategy import (load_strategy_settings, save_strategy_settings,
-                      build_plan, split_days)
+                      build_plan, split_days, read_soc_cache)
 from telegram import notify_event as _tg_notify, resolve_approval, get_pending_approvals
 
 import requests as _req  # aliased to avoid clash with flask.request
@@ -3704,7 +3704,7 @@ def _live_soc() -> float | None:
 
     # 3. last_soc.json (< 5 min old) – written by _collect_and_write with correct averaging
     _soc_file = os.path.join(DATA_DIR, "last_soc.json")
-    _cached = strategy.read_soc_cache(_soc_file, max_age_s=300)
+    _cached = read_soc_cache(_soc_file, max_age_s=300)
     if _cached is not None:
         return _cached
     log.debug("_live_soc: last_soc.json niet beschikbaar of te oud")
