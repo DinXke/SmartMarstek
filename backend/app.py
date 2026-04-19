@@ -2374,6 +2374,24 @@ def get_strategy_history():
     return jsonify({"hours": data})
 
 
+@app.route("/api/accuracy/summary")
+def get_accuracy_summary():
+    """Return forecast bias statistics from _plan_accuracy.json.
+
+    Exposes solar and consumption bias % + confidence for the UI dashboard.
+    Returns 204 when insufficient data (< 20 records).
+    """
+    try:
+        from strategy_claude import _get_accuracy_summary, _get_bias_correction_factors
+        summary = _get_accuracy_summary()
+        if not summary:
+            return ("", 204)
+        factors = _get_bias_correction_factors()
+        return jsonify({**summary, **factors})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/influx/recent")
 def get_influx_recent():
     """Return last N hours of energy flow data from InfluxDB."""

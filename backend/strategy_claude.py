@@ -462,12 +462,59 @@ def _get_accuracy_summary() -> dict | None:
             "→ houd ruimere veiligheidsmarge aan bij lage SOC-planning."
         )
 
+    solar_conf = round(max(0.0, 100.0 - solar_stats["mae_pct"]), 1) if solar_stats else None
+    cons_conf  = round(max(0.0, 100.0 - cons_stats["mae_pct"]),  1) if cons_stats  else None
+    if solar_conf is not None and cons_conf is not None:
+        confidence_pct = round((solar_conf + cons_conf) / 2.0, 1)
+    else:
+        confidence_pct = solar_conf or cons_conf
+
     return {
         "records_analysed": len(records),
         "solar_forecast":  solar_stats,
         "consumption_forecast": cons_stats,
         "soc_plan_mae_pct": soc_mae,
+        "confidence_pct": confidence_pct,
         "advice": notes,
+    }
+
+
+def _get_bias_correction_factors() -> dict:
+    """Return multiplicative correction factors derived from historical forecast bias.
+
+    Factors are applied to raw forecasts before planning so that systematic
+    over/under-predictions are compensated automatically.  Each factor is
+    capped to the range [0.70, 1.30] (max ±30 % correction) to avoid
+    over-fitting on noisy data.  Returns an empty dict when there are fewer
+    than 20 records (not enough evidence to correct).
+    """
+    summary = _get_accuracy_summary()
+    if not summary:
+        return {}
+
+    _CAP = 0.30  # maximum allowed correction fraction
+
+    solar_factor = 1.0
+    cons_factor  = 1.0
+
+    solar_stats = summary.get("solar_forecast", {})
+    cons_stats  = summary.get("consumption_forecast", {})
+
+    if solar_stats and solar_stats.get("n", 0) >= 10:
+        raw = -solar_stats["avg_bias_pct"] / 100.0           # negate: bias>0 → reduce forecast
+        solar_factor = round(1.0 + max(-_CAP, min(_CAP, raw)), 4)
+
+    if cons_stats and cons_stats.get("n", 0) >= 10:
+        raw = -cons_stats["avg_bias_pct"] / 100.0
+        cons_factor  = round(1.0 + max(-_CAP, min(_CAP, raw)), 4)
+
+    return {
+        "solar_factor":    solar_factor,
+        "cons_factor":     cons_factor,
+        "solar_bias_pct":  solar_stats.get("avg_bias_pct"),
+        "cons_bias_pct":   cons_stats.get("avg_bias_pct"),
+        "confidence_pct":  summary.get("confidence_pct"),
+        "n_records":       summary.get("records_analysed", 0),
     }
 
 
@@ -804,6 +851,20 @@ def build_plan_claude(
     except Exception as _eval_exc:
         log.debug("plan_accuracy: evaluation failed (non-fatal): %s", _eval_exc)
     _accuracy_summary = _get_accuracy_summary()
+    _bias_factors     = _get_bias_correction_factors()
+    _solar_factor     = _bias_factors.get("solar_factor", 1.0)
+    _cons_factor      = _bias_factors.get("cons_factor",  1.0)
+    if _bias_factors:
+        log.info(
+            "strategy_claude: bias correction applied — solar×%.3f (bias %+.1f%%)  "
+            "cons×%.3f (bias %+.1f%%)  confidence=%.0f%%  n=%d",
+            _solar_factor,
+            _bias_factors.get("solar_bias_pct") or 0.0,
+            _cons_factor,
+            _bias_factors.get("cons_bias_pct") or 0.0,
+            _bias_factors.get("confidence_pct") or 0.0,
+            _bias_factors.get("n_records", 0),
+        )
 
     # Price statistics (all-in prices)
     known_prices = [
@@ -850,8 +911,18 @@ def build_plan_claude(
         actual_solar = actual_row.get("solar_w")   # W·h ≈ Wh for 1h average
         actual_cons  = actual_row.get("house_w")
 
-        solar = round(actual_solar if actual_solar is not None else solar_by_slot.get(key, 0.0))
-        cons  = round(actual_cons  if actual_cons  is not None else _cons(slot_dt.weekday(), slot_dt.hour))
+        if actual_solar is not None:
+            solar = round(actual_solar)
+        else:
+            raw_solar = solar_by_slot.get(key, 0.0)
+            solar = round(raw_solar * _solar_factor) if not is_past else round(raw_solar)
+
+        if actual_cons is not None:
+            cons = round(actual_cons)
+        else:
+            raw_cons = _cons(slot_dt.weekday(), slot_dt.hour)
+            cons = round(raw_cons * _cons_factor) if not is_past else round(raw_cons)
+
         net   = solar - cons
 
         # Per-slot break-even: minimum future discharge price to make this charge profitable
@@ -1313,6 +1384,7 @@ def build_plan_claude(
             "min":    round(p_min,  4),
             "max":    round(p_max,  4),
         },
+        bias_correction=_bias_factors if _bias_factors else None,
         # Full per-slot reasoning for the debug panel (time, action, reason only)
         slot_reasoning=[
             {"time": item.get("time"), "action": item.get("action"), "reason": item.get("reason")}

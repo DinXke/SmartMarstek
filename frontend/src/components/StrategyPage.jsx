@@ -467,6 +467,92 @@ function ConsumptionProfile({ hours, standbyW = 0 }) {
   );
 }
 
+// ── Forecast bias / confidence panel ─────────────────────────────────────
+
+function BiasPanel() {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    fetch("api/accuracy/summary")
+      .then((r) => (r.status === 204 ? null : r.ok ? r.json() : null))
+      .then(setData)
+      .catch(() => {});
+  }, []);
+
+  if (!data) return null;
+
+  const { solar_forecast, consumption_forecast, confidence_pct, records_analysed,
+          solar_factor, cons_factor } = data;
+
+  function biasColor(bias) {
+    if (bias == null) return "var(--text-muted)";
+    const abs = Math.abs(bias);
+    if (abs < 5)  return "#22c55e";
+    if (abs < 15) return "#eab308";
+    return "#ef4444";
+  }
+
+  function biasBadge(bias, factor) {
+    if (bias == null) return "—";
+    const direction = bias > 0 ? "te hoog" : "te laag";
+    const corrected = factor != null && Math.abs(factor - 1.0) > 0.005
+      ? ` → gecorrigeerd ×${factor.toFixed(2)}`
+      : "";
+    return `${bias > 0 ? "+" : ""}${bias.toFixed(1)}% (${direction})${corrected}`;
+  }
+
+  const confColor = confidence_pct == null ? "var(--text-muted)"
+    : confidence_pct >= 80 ? "#22c55e"
+    : confidence_pct >= 60 ? "#eab308"
+    : "#ef4444";
+
+  return (
+    <div className="strat-day-panel" style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <span className="strat-day-title">📐 Prognose-kwaliteit &amp; bias-correctie</span>
+        {confidence_pct != null && (
+          <span style={{ fontSize: 13, fontWeight: 700, color: confColor }}>
+            {confidence_pct.toFixed(0)}% betrouwbaarheid
+          </span>
+        )}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 8, marginTop: 8 }}>
+        {solar_forecast && solar_forecast.n > 0 && (
+          <div style={{ background: "rgba(251,191,36,0.07)", borderRadius: 8,
+            border: "1px solid rgba(251,191,36,0.25)", padding: "10px 14px" }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 3 }}>
+              ☀️ Zonprognose bias ({solar_forecast.n} uur)
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: biasColor(solar_forecast.avg_bias_pct) }}>
+              {biasBadge(solar_forecast.avg_bias_pct, solar_factor)}
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+              MAE: {solar_forecast.mae_pct?.toFixed(1)}%
+            </div>
+          </div>
+        )}
+        {consumption_forecast && consumption_forecast.n > 0 && (
+          <div style={{ background: "rgba(96,165,250,0.07)", borderRadius: 8,
+            border: "1px solid rgba(96,165,250,0.25)", padding: "10px 14px" }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 3 }}>
+              🏠 Verbruiksprognose bias ({consumption_forecast.n} uur)
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: biasColor(consumption_forecast.avg_bias_pct) }}>
+              {biasBadge(consumption_forecast.avg_bias_pct, cons_factor)}
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+              MAE: {consumption_forecast.mae_pct?.toFixed(1)}%
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+        Op basis van {records_analysed} vergelijkingen (30d) · correctie automatisch toegepast op toekomstige slots
+      </div>
+    </div>
+  );
+}
+
 // ── Claude usage stats panel ─────────────────────────────────────────────
 
 function ClaudeStatsPanel() {
@@ -976,6 +1062,9 @@ export default function StrategyPage() {
 
       {/* Automation toggle – only shown in forward (today) view */}
       {!viewDate && <AutomationToggle planLoadedAt={planLoadedAt} />}
+
+      {/* Forecast bias / confidence panel */}
+      <BiasPanel />
 
       {/* Claude debug panel – shown when Claude engine was used */}
       {plan?.claude_debug && <ClaudeDebugPanel debug={plan.claude_debug} plan={plan} />}
