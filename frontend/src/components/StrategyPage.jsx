@@ -1025,9 +1025,24 @@ export default function StrategyPage() {
                   </>
                 )}
                 {" · "}
-                {plan.strategy_engine === "claude"
-                  ? <span style={{ color: "#818cf8", fontWeight: 600 }}>🤖 Claude AI{plan.claude_debug?.model ? ` (${plan.claude_debug.model.replace("claude-","").replace("-20251001","")})` : ""}</span>
-                  : <span style={{ color: "var(--text-muted)" }}>⚙️ Regelgebaseerd</span>
+                {plan.strategy_mode === "auto"
+                  ? (() => {
+                      const ai = plan.engine_auto_info;
+                      const actualEngine = plan.strategy_engine;
+                      const modelShort = ai?.model
+                        ? ai.model.replace("claude-", "").replace(/-20251001$/, "")
+                        : plan.claude_debug?.model?.replace("claude-", "").replace(/-20251001$/, "") || "";
+                      return actualEngine === "claude"
+                        ? <span title={ai?.reason || ""} style={{ color: "#818cf8", fontWeight: 600 }}>
+                            ✨ Auto → 🤖 Claude{modelShort ? ` (${modelShort})` : ""}
+                          </span>
+                        : <span title={ai?.reason || ""} style={{ color: "var(--text-muted)" }}>
+                            ✨ Auto → ⚙️ Regelgebaseerd
+                          </span>;
+                    })()
+                  : plan.strategy_engine === "claude"
+                    ? <span style={{ color: "#818cf8", fontWeight: 600 }}>🤖 Claude AI{plan.claude_debug?.model ? ` (${plan.claude_debug.model.replace("claude-","").replace("-20251001","")})` : ""}</span>
+                    : <span style={{ color: "var(--text-muted)" }}>⚙️ Regelgebaseerd</span>
                 }
               </>
             )}
@@ -1065,6 +1080,26 @@ export default function StrategyPage() {
 
       {/* Forecast bias / confidence panel */}
       <BiasPanel />
+
+      {/* Auto-engine info banner – shown when auto mode is active */}
+      {plan?.strategy_mode === "auto" && plan?.engine_auto_info && (
+        <div style={{
+          background: "rgba(99,102,241,0.07)", border: "1px solid rgba(99,102,241,0.2)",
+          borderRadius: 8, padding: "8px 14px", fontSize: 12, color: "var(--text-muted)",
+          display: "flex", gap: 12, alignItems: "center",
+        }}>
+          <span style={{ fontSize: 16 }}>✨</span>
+          <span>
+            <strong style={{ color: "var(--text)" }}>Auto-engine:</strong>{" "}
+            {plan.engine_auto_info.reason}
+            {plan.engine_auto_info.spread_eur_kwh != null && (
+              <span style={{ marginLeft: 8, opacity: 0.7 }}>
+                (spread {(plan.engine_auto_info.spread_eur_kwh * 100).toFixed(1)} ct/kWh)
+              </span>
+            )}
+          </span>
+        </div>
+      )}
 
       {/* Claude debug panel – shown when Claude engine was used */}
       {plan?.claude_debug && <ClaudeDebugPanel debug={plan.claude_debug} plan={plan} />}

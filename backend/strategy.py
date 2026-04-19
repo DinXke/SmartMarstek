@@ -81,12 +81,21 @@ DEFAULT_SETTINGS = {
     "pv_limiter_service":        "",     # e.g. "pysmaplus.set_value"
     "pv_limiter_service_param_key":   "entity_id",  # data key alongside "value": "entity_id" or "parameter"
     "pv_limiter_service_param":  "",     # value for that key, e.g. "sensor.sb4_0_active_power_limitation"
-    # Strategy engine: "rule_based" (default) or "claude" (uses Anthropic API)
+    # Strategy engine: "rule_based" (default), "claude", or "auto"
+    # "auto": picks rule_based on flat days, Claude on complex/negative-price days
     "strategy_mode":        "rule_based",
-    # Anthropic API key (only used when strategy_mode = "claude")
+    # Anthropic API key (only used when strategy_mode = "claude" or "auto")
     "claude_api_key":       "",
     # Claude model to use for planning (Sonnet = recommended; Haiku = cheapest/fastest)
     "claude_model":         "claude-sonnet-4-6",
+    # Auto-engine selection thresholds (only used when strategy_mode = "auto")
+    # p75−p25 < auto_complexity_threshold AND no negatives → rule_based (flat day)
+    # p75−p25 ≥ auto_complexity_high_threshold OR negatives → Claude Sonnet (complex)
+    # in between → Claude Haiku (average day)
+    "auto_complexity_threshold":      0.03,
+    "auto_complexity_high_threshold": 0.06,
+    "auto_claude_model_simple":       "claude-haiku-4-5-20251001",
+    "auto_claude_model_complex":      "claude-sonnet-4-6",
     # Capaciteitstarief-bescherming (België: maandelijkse piekkwartier)
     # Als actief_net + geplande_charge > cap_tariff_max_grid_w: proportioneel afknijpen/blokkeren.
     "cap_tariff_enabled":    False,
@@ -126,6 +135,68 @@ def save_strategy_settings(patch: dict) -> dict:
     with open(STRATEGY_SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(current, f, indent=2)
     return current
+
+
+def compute_price_complexity(prices: list, settings: Optional[dict] = None) -> dict:
+    """
+    Analyse price spread to choose the right engine for auto mode.
+
+    Returns a dict with:
+      selected_engine: "rule_based" | "claude"
+      model:           claude model id, or None for rule_based
+      complexity:      "flat" | "average" | "complex"
+      spread_eur_kwh:  p75 − p25 of market prices
+      has_negative:    any price < 0
+      reason:          human-readable Dutch explanation
+    """
+    s = settings or load_strategy_settings()
+    threshold_low  = float(s.get("auto_complexity_threshold",      0.03))
+    threshold_high = float(s.get("auto_complexity_high_threshold", 0.06))
+    model_simple   = s.get("auto_claude_model_simple",  "claude-haiku-4-5-20251001")
+    model_complex  = s.get("auto_claude_model_complex", "claude-sonnet-4-6")
+
+    vals = [float(p["marketPrice"]) for p in (prices or [])
+            if p.get("marketPrice") is not None]
+    if not vals:
+        return {
+            "selected_engine": "rule_based", "model": None,
+            "complexity": "flat", "spread_eur_kwh": 0.0, "has_negative": False,
+            "reason": "geen prijsdata beschikbaar",
+        }
+
+    sorted_vals  = sorted(vals)
+    n            = len(sorted_vals)
+    p25          = sorted_vals[int(n * 0.25)]
+    p75          = sorted_vals[int(n * 0.75)]
+    spread       = p75 - p25
+    has_negative = any(v < 0 for v in vals)
+
+    if spread < threshold_low and not has_negative:
+        return {
+            "selected_engine": "rule_based", "model": None, "complexity": "flat",
+            "spread_eur_kwh": spread, "has_negative": False,
+            "reason": (f"vlakke dag — spread {spread*100:.1f}ct < {threshold_low*100:.0f}ct, "
+                       "geen negatieve prijzen"),
+        }
+
+    if spread >= threshold_high or has_negative:
+        parts = []
+        if has_negative:
+            parts.append("negatieve prijzen aanwezig")
+        if spread >= threshold_high:
+            parts.append(f"grote spread {spread*100:.1f}ct ≥ {threshold_high*100:.0f}ct")
+        return {
+            "selected_engine": "claude", "model": model_complex, "complexity": "complex",
+            "spread_eur_kwh": spread, "has_negative": has_negative,
+            "reason": f"complexe dag — {', '.join(parts)}",
+        }
+
+    return {
+        "selected_engine": "claude", "model": model_simple, "complexity": "average",
+        "spread_eur_kwh": spread, "has_negative": False,
+        "reason": (f"gemiddelde dag — spread {spread*100:.1f}ct "
+                   f"({threshold_low*100:.0f}–{threshold_high*100:.0f}ct)"),
+    }
 
 
 # ---------------------------------------------------------------------------

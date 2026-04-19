@@ -3392,8 +3392,31 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
     ).hexdigest()[:12]
 
     # ── Build plan & update cache ─────────────────────────────────────────
-    _claude_debug = None
-    if s.get("strategy_mode") == "claude":
+    _claude_debug    = None
+    _auto_info       = None
+    _mode_configured = s.get("strategy_mode", "rule_based")
+
+    def _build_with_claude(s_in: dict, *, model_override: str | None = None) -> tuple:
+        """Call Claude engine; return (plan, debug). Raises on failure."""
+        s_c = dict(s_in)
+        if model_override:
+            s_c["claude_model"] = model_override
+        import strategy_claude as _sc_mod
+        _plan = _sc_mod.build_plan_claude(prices, solar_wh, consumption_by_hour, soc_now, s_c,
+                                          today_actuals=today_actuals)
+        return _plan, _sc_mod.get_last_debug()
+
+    def _apply_device_soc(s_in: dict) -> dict:
+        _dmin, _dmax = _effective_soc_limits(load_devices(), s_in)
+        s_out = dict(s_in)
+        if _dmin != int(s_in.get("min_reserve_soc", 10)) or _dmax != int(s_in.get("max_soc", 95)):
+            s_out["min_reserve_soc"] = _dmin
+            s_out["max_soc"]         = _dmax
+            log.info("_compute_forward_plan: per-device SoC limits applied min=%d%% max=%d%%",
+                     _dmin, _dmax)
+        return s_out
+
+    if _mode_configured == "claude":
         # Only call Claude when prices have actually changed.
         # Serve cached plan otherwise (price-fingerprint based, not time-based).
         _cached_fp  = _plan_cache.get("price_fingerprint")
@@ -3401,40 +3424,57 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
         if not force_claude and _have_cache and _cached_fp == _price_fp:
             log.info("_compute_forward_plan: Claude mode – prices unchanged (fp=%s), serving cache",
                      _price_fp)
-            # Update SoC in cached result so the UI reflects current battery level
             _plan_cache["result"]["soc_now"] = soc_now
             return _plan_cache["result"]
 
         log.info("_compute_forward_plan: Claude mode – %s (fp %s→%s)",
                  "forced refresh" if force_claude else "new prices",
                  _cached_fp or "none", _price_fp)
-        # Inject per-device effective SoC limits into settings before calling strategy
-        _dev_min, _dev_max = _effective_soc_limits(load_devices(), s)
-        s_eff = dict(s)
-        if _dev_min != int(s.get("min_reserve_soc", 10)) or _dev_max != int(s.get("max_soc", 95)):
-            s_eff["min_reserve_soc"] = _dev_min
-            s_eff["max_soc"]         = _dev_max
-            log.info("_compute_forward_plan: per-device SoC limits applied min=%d%% max=%d%%",
-                     _dev_min, _dev_max)
-        else:
-            s_eff = s
+        s_eff = _apply_device_soc(s)
         try:
-            import strategy_claude as _sc_mod
-            plan = _sc_mod.build_plan_claude(prices, solar_wh, consumption_by_hour, soc_now, s_eff,
-                                              today_actuals=today_actuals)
-            _claude_debug = _sc_mod.get_last_debug()
+            plan, _claude_debug = _build_with_claude(s_eff)
             log.info("_compute_forward_plan: Claude engine done  fallback=%s",
                      _claude_debug.get("fallback"))
         except Exception as _ce:
             log.warning("_compute_forward_plan: Claude engine failed (%s) — rule-based fallback", _ce)
             plan = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s_eff)
+
+    elif _mode_configured == "auto":
+        # Analyse price complexity and pick the cheapest engine that's good enough.
+        from strategy import compute_price_complexity as _cpc
+        _auto_info = _cpc(prices, s)
+        _selected  = _auto_info["selected_engine"]
+        log.info("_compute_forward_plan: auto mode → %s (%s)", _selected, _auto_info["reason"])
+
+        _cached_fp  = _plan_cache.get("price_fingerprint")
+        _have_cache = bool(_plan_cache.get("result"))
+
+        if _selected == "claude":
+            if not force_claude and _have_cache and _cached_fp == _price_fp:
+                log.info("_compute_forward_plan: auto/Claude – prices unchanged, serving cache")
+                _plan_cache["result"]["soc_now"]    = soc_now
+                _plan_cache["result"]["engine_auto_info"] = _auto_info
+                return _plan_cache["result"]
+            s_eff = _apply_device_soc(s)
+            try:
+                plan, _claude_debug = _build_with_claude(s_eff, model_override=_auto_info.get("model"))
+                log.info("_compute_forward_plan: auto/Claude done  fallback=%s",
+                         _claude_debug.get("fallback"))
+            except Exception as _ce:
+                log.warning("_compute_forward_plan: auto/Claude failed (%s) — rule-based fallback", _ce)
+                plan = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s_eff)
+                _selected = "rule_based"
+        else:
+            s_eff = _apply_device_soc(s)
+            plan  = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s_eff)
+
+        # Expose actual engine used (may differ from _auto_info if fallback occurred)
+        _auto_info["actual_engine"] = _selected
+
     else:
-        _dev_min, _dev_max = _effective_soc_limits(load_devices(), s)
-        s_eff = dict(s)
-        if _dev_min != int(s.get("min_reserve_soc", 10)) or _dev_max != int(s.get("max_soc", 95)):
-            s_eff["min_reserve_soc"] = _dev_min
-            s_eff["max_soc"]         = _dev_max
-        plan = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s_eff)
+        s_eff = _apply_device_soc(s)
+        plan  = build_plan(prices, solar_wh, consumption_by_hour, soc_now, s_eff)
+
     result = split_days(plan)
     result["consumption_by_hour"] = consumption_by_hour
     result["prices_available"]    = len(prices) > 0
@@ -3443,10 +3483,17 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
     result["is_historical"]       = False
     result["consumption_source"]  = consumption_source
     result["price_source_used"]   = price_source
-    result["strategy_engine"]     = s.get("strategy_mode", "rule_based")
     result["price_fingerprint"]   = _price_fp
+    result["strategy_mode"]       = _mode_configured
+    # strategy_engine = actually used engine (rule_based or claude)
+    if _mode_configured == "auto" and _auto_info:
+        result["strategy_engine"] = _auto_info.get("actual_engine", _auto_info.get("selected_engine", "rule_based"))
+    else:
+        result["strategy_engine"] = _mode_configured
     if _claude_debug:
         result["claude_debug"]    = _claude_debug
+    if _auto_info:
+        result["engine_auto_info"] = _auto_info
     # Expose calculated (or configured) standby for display in the UI
     from strategy import load_strategy_settings as _lss
     _ss = _lss()
@@ -3473,7 +3520,7 @@ def _compute_forward_plan(force_claude: bool = False) -> dict:
             "grid_charge_hours": sum(1 for sl in today_slots if sl.get("action") == "grid_charge"),
             "discharge_hours":   sum(1 for sl in today_slots if sl.get("action") == "discharge"),
             "soc_now":           soc_now,
-            "engine":            s.get("strategy_mode", "rule_based"),
+            "engine":            result.get("strategy_engine", "rule_based"),
         })
     except Exception as _tge:
         log.debug("plan_ready telegram notify failed: %s", _tge)

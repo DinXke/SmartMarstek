@@ -22,9 +22,13 @@ const DEFAULTS = {
   consumption_source:   "auto",
   standby_w:            0,
   save_price_factor:    0.30,
-  strategy_mode:        "rule_based",
-  claude_api_key:       "",
-  claude_model:         "claude-haiku-4-5-20251001",
+  strategy_mode:                  "rule_based",
+  claude_api_key:                 "",
+  claude_model:                   "claude-haiku-4-5-20251001",
+  auto_complexity_threshold:      0.03,
+  auto_complexity_high_threshold: 0.06,
+  auto_claude_model_simple:       "claude-haiku-4-5-20251001",
+  auto_claude_model_complex:      "claude-sonnet-4-6",
 };
 
 function Row({ label, desc, children }) {
@@ -365,11 +369,16 @@ export default function StrategySettings() {
             <div className="settings-row-label">Planningsengine</div>
             <div className="settings-row-desc">
               Regelgebaseerd = lokaal algoritme, altijd beschikbaar.
+              Auto = kiest automatisch op basis van prijsspreiding.
               Claude AI = Anthropic API, vereist API-sleutel. Haiku is ~€0,001/berekening.
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-            {[{ val: "rule_based", label: "Regelgebaseerd" }, { val: "claude", label: "Claude AI" }].map(({ val, label }) => (
+            {[
+              { val: "rule_based", label: "Regelgebaseerd" },
+              { val: "auto",       label: "Auto" },
+              { val: "claude",     label: "Claude AI" },
+            ].map(({ val, label }) => (
               <button key={val} type="button"
                 onClick={() => set("strategy_mode", val)}
                 style={{
@@ -399,14 +408,69 @@ export default function StrategySettings() {
                 <select className="form-input" style={{ width: 220 }}
                   value={vals.claude_model} onChange={(e) => set("claude_model", e.target.value)}>
                   <option value="claude-haiku-4-5-20251001">Haiku 4.5 — snel &amp; goedkoop (~€0,001)</option>
-                  <option value="claude-sonnet-4-5">Sonnet 4.5 — beter redeneren (~€0,01)</option>
-                  <option value="claude-opus-4-5">Opus 4.5 — meest intelligent (~€0,05)</option>
+                  <option value="claude-sonnet-4-6">Sonnet 4.6 — beter redeneren (~€0,01)</option>
+                  <option value="claude-opus-4-7">Opus 4.7 — meest intelligent (~€0,05)</option>
                 </select>
               </div>
             </div>
             <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
               Slaat de batterijstatus, prijzen en verbruiksprofiel op als JSON en stuurt die naar Claude.
               Bij fout of geen sleutel valt het systeem automatisch terug op de regelgebaseerde engine.
+            </div>
+          </div>
+        )}
+
+        {vals.strategy_mode === "auto" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", paddingTop: 4 }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              Auto selecteert de engine op basis van de dagelijkse prijsspreiding (p75−p25):
+              vlakke dag → regelgebaseerd, gemiddelde dag → Haiku, complexe dag of negatieve prijzen → Sonnet.
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ flex: 1 }}>
+                <div className="settings-row-label" style={{ marginBottom: 4 }}>Anthropic API-sleutel</div>
+                <input className="form-input" type="password" style={{ width: "100%" }}
+                  placeholder="sk-ant-…"
+                  value={vals.claude_api_key}
+                  onChange={(e) => set("claude_api_key", e.target.value)} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 12 }}>
+              <div style={{ flex: 1 }}>
+                <div className="settings-row-label" style={{ marginBottom: 4 }}>Vlak-drempel (ct/kWh)</div>
+                <div className="settings-row-desc" style={{ marginBottom: 4 }}>Spread &lt; dit → regelgebaseerd</div>
+                <input className="form-input" type="number" min="0" max="20" step="0.5"
+                  value={Math.round(vals.auto_complexity_threshold * 100 * 10) / 10}
+                  onChange={(e) => set("auto_complexity_threshold", parseFloat(e.target.value) / 100)} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div className="settings-row-label" style={{ marginBottom: 4 }}>Complex-drempel (ct/kWh)</div>
+                <div className="settings-row-desc" style={{ marginBottom: 4 }}>Spread ≥ dit of negatief → Sonnet</div>
+                <input className="form-input" type="number" min="0" max="30" step="0.5"
+                  value={Math.round(vals.auto_complexity_high_threshold * 100 * 10) / 10}
+                  onChange={(e) => set("auto_complexity_high_threshold", parseFloat(e.target.value) / 100)} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 12 }}>
+              <div style={{ flex: 1 }}>
+                <div className="settings-row-label" style={{ marginBottom: 4 }}>Model — gemiddelde dag</div>
+                <select className="form-input" style={{ width: "100%" }}
+                  value={vals.auto_claude_model_simple}
+                  onChange={(e) => set("auto_claude_model_simple", e.target.value)}>
+                  <option value="claude-haiku-4-5-20251001">Haiku 4.5 (~€0,001)</option>
+                  <option value="claude-sonnet-4-6">Sonnet 4.6 (~€0,01)</option>
+                </select>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div className="settings-row-label" style={{ marginBottom: 4 }}>Model — complexe dag</div>
+                <select className="form-input" style={{ width: "100%" }}
+                  value={vals.auto_claude_model_complex}
+                  onChange={(e) => set("auto_claude_model_complex", e.target.value)}>
+                  <option value="claude-haiku-4-5-20251001">Haiku 4.5 (~€0,001)</option>
+                  <option value="claude-sonnet-4-6">Sonnet 4.6 (~€0,01)</option>
+                  <option value="claude-opus-4-7">Opus 4.7 (~€0,05)</option>
+                </select>
+              </div>
             </div>
           </div>
         )}
