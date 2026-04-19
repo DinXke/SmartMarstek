@@ -39,6 +39,9 @@ BASE_SETTINGS = {
     "claude_model": "claude-sonnet-4-6",
     "cap_tariff_enabled":    False,
     "cap_tariff_max_grid_w": 8000,
+    "neg_price_discharge_enabled": True,
+    "neg_price_lookahead_h":       4,
+    "neg_price_threshold_ct":      0.0,
 }
 
 

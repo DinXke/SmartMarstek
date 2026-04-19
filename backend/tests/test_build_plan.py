@@ -541,3 +541,112 @@ class TestMissingPrices:
             assert slot(slots, i)["action"] == NEUTRAL
         for i in range(2, 6):
             assert slot(slots, i)["price_eur_kwh"] is None
+
+
+# ---------------------------------------------------------------------------
+# Negative prices — preventive discharge (SCH-72)
+# ---------------------------------------------------------------------------
+# All tests use:
+#   manual_peak_hours=[17,18,19,20]  → hour 0 is NOT a peak, so regular peak-
+#                                       discharge logic cannot fire first.
+#   grid_markup_eur_kwh=0.0 (from BASE_SETTINGS) → price arithmetic is exact.
+# ---------------------------------------------------------------------------
+
+class TestNegativePrice:
+    # Shared price pattern: slots 0-1 positive, slot 2 negative.
+    _PRICES_NEG_AT_2 = [0.10, 0.10, -0.05] + [0.10] * 45
+
+    def _s(self, **kw):
+        return settings(manual_peak_hours=[17, 18, 19, 20], **kw)
+
+    def test_preventive_discharge_before_negative_window(self):
+        """Battery above minimum + negative price within lookahead → DISCHARGE."""
+        prices = make_prices(hourly_prices=self._PRICES_NEG_AT_2)
+        cons = make_consumption(300.0)
+        s = self._s()
+
+        slots = build_plan(prices, {}, cons, bat_soc_now=80.0,
+                           settings=s, start_dt=TEST_START, num_slots=6)
+
+        assert slot(slots, 0)["action"] == DISCHARGE
+        assert "Preventief ontladen" in slot(slots, 0)["reason"]
+
+    def test_no_preventive_discharge_when_disabled(self):
+        """neg_price_discharge_enabled=False → no preventive discharge."""
+        prices = make_prices(hourly_prices=self._PRICES_NEG_AT_2)
+        cons = make_consumption(300.0)
+        s = self._s(neg_price_discharge_enabled=False)
+
+        slots = build_plan(prices, {}, cons, bat_soc_now=80.0,
+                           settings=s, start_dt=TEST_START, num_slots=6)
+
+        assert slot(slots, 0)["action"] != DISCHARGE
+
+    def test_no_preventive_discharge_when_battery_at_minimum(self):
+        """Battery at min_reserve_soc → nothing to discharge → no preventive discharge."""
+        prices = make_prices(hourly_prices=self._PRICES_NEG_AT_2)
+        cons = make_consumption(300.0)
+        s = self._s(min_reserve_soc=10)
+
+        slots = build_plan(prices, {}, cons, bat_soc_now=10.0,
+                           settings=s, start_dt=TEST_START, num_slots=6)
+
+        assert slot(slots, 0)["action"] != DISCHARGE
+
+    def test_preventive_discharge_then_grid_charge(self):
+        """
+        Full scenario: discharge in slots before negative window, then GRID_CHARGE.
+
+        Battery at 90% SoC, slots 0-1 have positive price, slot 2 is negative.
+        Expected: slots 0 & 1 → DISCHARGE (creates headroom), slot 2 → GRID_CHARGE.
+        The SoC at the start of slot 2 must be lower than at slot 0 start (headroom made).
+        """
+        hourly = [0.10, 0.10, -0.10] + [0.10] * 45
+        prices = make_prices(hourly_prices=hourly)
+        cons = make_consumption(300.0)
+        s = self._s()
+
+        slots = build_plan(prices, {}, cons, bat_soc_now=90.0,
+                           settings=s, start_dt=TEST_START, num_slots=6)
+
+        assert slot(slots, 0)["action"] == DISCHARGE
+        assert slot(slots, 1)["action"] == DISCHARGE
+        assert slot(slots, 2)["action"] == GRID_CHARGE
+        assert slot(slots, 2)["soc_start"] < slot(slots, 0)["soc_start"]
+
+    def test_lookahead_window_boundary(self):
+        """
+        Negative price at slot 5: default lookahead=4 → no discharge at slot 0.
+        With lookahead=6 → discharge at slot 0.
+        """
+        hourly = [0.10] * 5 + [-0.05] + [0.10] * 42
+        prices = make_prices(hourly_prices=hourly)
+        cons = make_consumption(300.0)
+
+        s_short = self._s(neg_price_lookahead_h=4)
+        s_long  = self._s(neg_price_lookahead_h=6)
+
+        slots_short = build_plan(prices, {}, cons, bat_soc_now=80.0,
+                                  settings=s_short, start_dt=TEST_START, num_slots=8)
+        slots_long  = build_plan(prices, {}, cons, bat_soc_now=80.0,
+                                  settings=s_long,  start_dt=TEST_START, num_slots=8)
+
+        assert slot(slots_short, 0)["action"] != DISCHARGE
+        assert slot(slots_long,  0)["action"] == DISCHARGE
+
+    def test_custom_threshold_triggers_on_near_zero_price(self):
+        """
+        neg_price_threshold_ct=5.0 → upcoming price of 3 ct/kWh triggers discharge.
+
+        With threshold=5ct/kWh (=0.05 €/kWh), a price of 3ct at slot 2 is below
+        the threshold and should cause preventive discharge at slot 0.
+        """
+        hourly = [0.10, 0.10, 0.03] + [0.10] * 45  # 3 ct at slot 2 (positive but near-zero)
+        prices = make_prices(hourly_prices=hourly)
+        cons = make_consumption(300.0)
+        s = self._s(neg_price_threshold_ct=5.0)
+
+        slots = build_plan(prices, {}, cons, bat_soc_now=80.0,
+                           settings=s, start_dt=TEST_START, num_slots=6)
+
+        assert slot(slots, 0)["action"] == DISCHARGE

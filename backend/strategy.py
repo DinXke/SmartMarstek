@@ -91,6 +91,12 @@ DEFAULT_SETTINGS = {
     # Als actief_net + geplande_charge > cap_tariff_max_grid_w: proportioneel afknijpen/blokkeren.
     "cap_tariff_enabled":    False,
     "cap_tariff_max_grid_w": 8000,   # W — max toegestaan netsaldo (import) incl. huis + EV + laden
+    # Preventieve ontlading vóór negatieve prijsvensters
+    # Ontlaad de batterij in de aanloop naar negatieve prijzen zodat er meer
+    # ruimte is voor gratis/betaald laden tijdens het negatieve prijsvenster.
+    "neg_price_discharge_enabled": True,
+    "neg_price_lookahead_h":       4,    # uren vooruitkijken voor negatieve prijs
+    "neg_price_threshold_ct":      0.0,  # ct/kWh: prijs < dit = negatief (0 = alleen echt negatief)
 }
 
 
@@ -151,6 +157,9 @@ def build_plan(
     tz_name       = s.get("timezone", "Europe/Brussels")
     tz            = ZoneInfo(tz_name)
     manual_peaks  = s.get("manual_peak_hours", [])
+    neg_dis_en     = bool(s.get("neg_price_discharge_enabled", True))
+    neg_dis_ahead  = int(s.get("neg_price_lookahead_h", 4))
+    neg_dis_thresh = s.get("neg_price_threshold_ct", 0.0) / 100.0  # ct → €/kWh
 
     # Consumption lookup — supports both weekday-aware {(weekday, hour): avg_Wh}
     # and legacy {hour: avg_Wh} formats.
@@ -367,6 +376,15 @@ def build_plan(
 
             is_peak_hour = _is_peak(weekday, hour)
 
+            # Preventive-discharge lookahead: is there a negative price within N hours?
+            _upcoming_neg = False
+            if neg_dis_en and buy_price > neg_dis_thresh:
+                for j in range(i + 1, min(i + neg_dis_ahead + 1, num_slots)):
+                    fp_raw = price_slots.get(all_slots[j].isoformat())
+                    if fp_raw is not None and (fp_raw + markup) < neg_dis_thresh:
+                        _upcoming_neg = True
+                        break
+
             # Effective charge cost = buy_price / rte + charge depreciation.
             eff_charge_cost = buy_price / rte + depr   # €/kWh stored
             charge_spread   = max_future - eff_charge_cost
@@ -393,6 +411,18 @@ def build_plan(
                 bat_kwh    += charge_kwh * rte
                 action = GRID_CHARGE
                 reason = f"Negatieve prijs ({buy_price*100:.1f}ct) – laden = gratis/betaald"
+
+            elif _upcoming_neg and bat_kwh > bat_min + 0.2:
+                # Negative price expected within lookahead window: discharge now to
+                # create battery headroom for free/paid grid charging later.
+                discharge_possible = min(cons_wh_slot / 1000.0, bat_kwh - bat_min)
+                if discharge_possible > 0.05:
+                    bat_kwh      -= discharge_possible
+                    discharge_kwh = discharge_possible
+                    action = DISCHARGE
+                    reason = f"Preventief ontladen: negatieve prijs ≤{neg_dis_ahead}u verwacht"
+                else:
+                    action = NEUTRAL
 
             elif is_peak_hour and bat_kwh > bat_min + 0.2 and buy_price >= price_median:
                 # Peak hour AND price is at or above the day's median.
