@@ -3520,16 +3520,11 @@ def _live_soc() -> float | None:
         pass
 
     # 3. last_soc.json (< 5 min old) – written by _collect_and_write with correct averaging
-    try:
-        _soc_file = os.path.join(DATA_DIR, "last_soc.json")
-        with open(_soc_file, encoding="utf-8") as _f:
-            _sc = json.load(_f)
-        _age_s = time.time() - _sc.get("ts", 0)
-        if _age_s < 300:
-            return float(_sc["soc"])
-        log.debug("_live_soc: last_soc.json te oud (%.0fs)", _age_s)
-    except Exception as _e:
-        log.debug("_live_soc: last_soc.json niet leesbaar: %s", _e)
+    _soc_file = os.path.join(DATA_DIR, "last_soc.json")
+    _cached = strategy.read_soc_cache(_soc_file, max_age_s=300)
+    if _cached is not None:
+        return _cached
+    log.debug("_live_soc: last_soc.json niet beschikbaar of te oud")
 
     # 4. ESPHome direct SSE poll of all configured devices (no flow_cfg mapping needed)
     try:

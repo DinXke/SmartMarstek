@@ -494,6 +494,26 @@ def build_plan(
 # Convenience: split today / tomorrow
 # ---------------------------------------------------------------------------
 
+def read_soc_cache(soc_file: str, max_age_s: float = 300) -> Optional[float]:
+    """Return SOC from a last_soc.json cache file if it is fresher than max_age_s.
+
+    Returns None when the file is missing, unreadable, stale, or contains an
+    out-of-range value.  Extracted here so it can be unit-tested without Flask.
+    """
+    import time
+    try:
+        with open(soc_file, encoding="utf-8") as f:
+            data = json.load(f)
+        age_s = time.time() - data.get("ts", 0)
+        if age_s < max_age_s:
+            val = float(data["soc"])
+            if 0.0 <= val <= 100.0:
+                return val
+    except Exception:
+        pass
+    return None
+
+
 def split_days(slots: list[dict]) -> dict:
     today_str    = datetime.now().date().isoformat()
     tomorrow_str = (datetime.now().date() + timedelta(days=1)).isoformat()
