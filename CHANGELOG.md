@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.26.0] - 2026-04-24
+
+### Added
+- **Zonnepanelen aansturing op basis van stroomprijs** ([SCH-616](/SCH/issues/SCH-616)):
+  PV-limiter stuurt nu automatisch op basis van de actuele Frank-prijs (all-in, inclusief belastingen).
+  - Negatieve prijs → limiet instellen op minimaal vermogen (standaard 0W)
+  - Positieve prijs → limiet instellen op maximaal vermogen (standaard 4000W)
+  - Nieuw instelbaar veld 'Minimaal PV-vermogen (W)' in Instellingen → PV-limiter
+
+## [1.25.2] - 2026-04-24
+
+### Fixed
+- **Reserve instelling correct doorgegeven** ([SCH-116](/SCH/issues/SCH-116)):
+  Reserve-instelling wordt nu correct doorgegeven aan Claude en batterijen.
+
 ## [1.24.5] - 2026-04-19
 
 ### Changed
