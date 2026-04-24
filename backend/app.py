@@ -595,39 +595,49 @@ def frank_consumption_test():
         log.info("Testing Frank consumption query  country=%s", country)
 
         yesterday = today - timedelta(days=1)
+        results = {}
 
-        # GraphQL introspection to find available query fields
-        introspection_query = """
-{ __schema { queryType { fields { name args { name type { name kind ofType { name kind } } } } } } }
-"""
-        introspection_result = {}
-        try:
-            resp_raw = _req.post(FRANK_API_URL,
-                                 json={"query": introspection_query},
-                                 headers={
-                                     "Content-Type": "application/json",
-                                     "Authorization": f"Bearer {auth_token}",
-                                     "x-country": "BE",
-                                     "x-graphql-client-name": "frank-app",
-                                     "x-graphql-client-version": "4.13.3",
-                                     "skip-graphcdn": "1",
-                                 }, timeout=15)
-            schema = resp_raw.json().get("data", {}).get("__schema", {})
-            fields = schema.get("queryType", {}).get("fields", [])
-            consumption_fields = [f["name"] for f in fields if "consum" in f["name"].lower() or "usage" in f["name"].lower() or "meter" in f["name"].lower()]
-            all_fields = [f["name"] for f in fields]
-            introspection_result = {"consumption_related": consumption_fields, "total_fields": len(all_fields), "all_fields": all_fields[:30]}
-        except Exception as exc:
-            introspection_result = {"error": str(exc)}
+        # Try many different field names that might exist for BE consumption
+        candidate_queries = {
+            "consumptionElectricity": f'query {{ consumptionElectricity(startDate: "{yesterday}", endDate: "{today}") {{ from till usage }} }}',
+            "consumption": f'query {{ consumption(date: "{yesterday}") {{ electricity {{ from till usage }} }} }}',
+            "periodConsumption": f'query {{ periodConsumption(startDate: "{yesterday}", endDate: "{today}") {{ from till usage }} }}',
+            "me_consumption": f'query {{ me {{ consumptionElectricity(startDate: "{yesterday}", endDate: "{today}") {{ from till usage }} }} }}',
+            "electricityConsumption": f'query {{ electricityConsumption(startDate: "{yesterday}", endDate: "{today}") {{ from till usage }} }}',
+            "usageElectricity": f'query {{ usageElectricity(startDate: "{yesterday}", endDate: "{today}") {{ from till usage }} }}',
+        }
+
+        headers_be = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {auth_token}",
+            "x-country": "BE",
+            "x-graphql-client-name": "frank-app",
+            "x-graphql-client-version": "4.13.3",
+            "skip-graphcdn": "1",
+        }
+
+        for name, gql in candidate_queries.items():
+            try:
+                r = _req.post(FRANK_API_URL, json={"query": gql}, headers=headers_be, timeout=10)
+                body = r.json()
+                data = body.get("data") or {}
+                errors = body.get("errors") or []
+                results[name] = {
+                    "data_keys": list(data.keys()) if isinstance(data, dict) else str(data)[:50],
+                    "has_error": bool(errors) or ("error" in (data or {})),
+                    "rows": len(list(data.values())[0]) if data and not errors and isinstance(list(data.values())[0], list) else 0
+                }
+            except Exception as exc:
+                results[name] = {"error": str(exc)}
 
         frank_rows = _fetch_consumption(auth_token, today, tomorrow, country)
 
         return jsonify({
             "status": "ok",
             "country": country,
-            "date_tested": str(today),
+            "date_tested": str(yesterday),
             "rows_returned": len(frank_rows),
-            "introspection": introspection_result
+            "candidate_queries": results
         })
     except Exception as exc:
         log.error("Frank consumption test error: %s", exc, exc_info=True)
