@@ -514,12 +514,13 @@ def frank_consumption():
         if not auth_token:
             return jsonify({"error": "Frank authentication required"}), 401
 
-        log.info("Fetching consumption  startDate=%s  endDate=%s  country=%s",
-                 start.isoformat(), end.isoformat(), country)
+        log.info("Fetching consumption  startDate=%s  endDate=%s  country=%s  token_valid=%s",
+                 start.isoformat(), end.isoformat(), country, bool(auth_token))
 
         # Fetch Frank consumption and P1 meter data for each day in range
         consumption_data = {}
         current_day = start
+        day_count = 0
         while current_day <= end:
             day_key = current_day.isoformat()
 
@@ -566,6 +567,38 @@ def frank_consumption():
     except Exception as exc:
         log.error("Consumption fetch error: %s", exc, exc_info=True)
         return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/frank/consumption-test", methods=["GET"])
+def frank_consumption_test():
+    """Test endpoint to debug Frank consumption API issues."""
+    try:
+        session = _frank_session()
+        auth_token = session.get("authToken")
+        country = session.get("country") or "NL"
+
+        if not auth_token:
+            return jsonify({"status": "error", "reason": "No Frank authentication"}), 401
+
+        today = date.today()
+        tomorrow = today + timedelta(days=1)
+
+        log.info("Testing Frank consumption query  country=%s", country)
+        frank_rows = _fetch_consumption(auth_token, today, tomorrow, country)
+
+        return jsonify({
+            "status": "ok",
+            "country": country,
+            "date_range": f"{today} to {tomorrow}",
+            "rows_returned": len(frank_rows),
+            "sample_row": frank_rows[0] if frank_rows else None
+        })
+    except Exception as exc:
+        log.error("Frank consumption test error: %s", exc, exc_info=True)
+        return jsonify({
+            "status": "error",
+            "reason": str(exc)
+        }), 500
 
 
 @app.route("/api/frank/today-consumption", methods=["GET"])
