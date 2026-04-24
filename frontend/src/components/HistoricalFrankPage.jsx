@@ -13,6 +13,7 @@ function HistoricalFrankPage() {
     new Date().toISOString().split("T")[0]
   );
   const [zoomLevel, setZoomLevel] = useState(1);
+  const [granularity, setGranularity] = useState("day"); // "hour", "day", "week", "month"
 
   const fetchConsumption = async () => {
     setLoading(true);
@@ -65,10 +66,39 @@ function HistoricalFrankPage() {
     setZoomLevel(newZoom);
   };
 
-  const maxValue = consumption.length > 0
+  const aggregateData = (data, gran) => {
+    if (gran === "hour") return data;
+
+    const grouped = {};
+    data.forEach((point) => {
+      let key;
+      if (gran === "day") {
+        key = point.date;
+      } else if (gran === "week") {
+        const d = new Date(point.date);
+        const weekStart = new Date(d);
+        weekStart.setDate(d.getDate() - d.getDay());
+        key = weekStart.toISOString().split("T")[0];
+      } else if (gran === "month") {
+        key = point.date.substring(0, 7); // YYYY-MM
+      }
+
+      if (!grouped[key]) {
+        grouped[key] = { date: key, frank_kwh: 0, p1_import_kwh: 0, p1_export_kwh: 0, label: key };
+      }
+      grouped[key].frank_kwh += point.frank_kwh || 0;
+      grouped[key].p1_import_kwh += point.p1_import_kwh || 0;
+      grouped[key].p1_export_kwh += point.p1_export_kwh || 0;
+    });
+
+    return Object.values(grouped).sort((a, b) => a.date.localeCompare(b.date));
+  };
+
+  const aggregated = aggregateData(consumption, granularity);
+  const maxValue = aggregated.length > 0
     ? Math.max(
-        ...consumption.map((c) => c.frank_kwh || 0),
-        ...consumption.map((c) => c.p1_import_kwh || 0)
+        ...aggregated.map((c) => c.frank_kwh || 0),
+        ...aggregated.map((c) => c.p1_import_kwh || 0)
       )
     : 100;
 
@@ -97,6 +127,17 @@ function HistoricalFrankPage() {
         <button className="btn btn-ghost btn-sm" onClick={handlePrevious}>
           ← Vorige
         </button>
+        <div className="granularity-controls">
+          {["hour", "day", "week", "month"].map((g) => (
+            <button
+              key={g}
+              className={`btn btn-sm ${granularity === g ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setGranularity(g)}
+            >
+              {g === "hour" ? "Uur" : g === "day" ? "Dag" : g === "week" ? "Week" : "Maand"}
+            </button>
+          ))}
+        </div>
         <div className="zoom-controls">
           <button className="btn btn-ghost btn-sm" onClick={() => handleZoom("out")}>
             🔍−
@@ -133,8 +174,8 @@ function HistoricalFrankPage() {
       ) : (
         <div className="historical-frank-chart" style={{ transform: `scale(${zoomLevel})`, transformOrigin: "top center" }}>
           <div className="chart-bars">
-            {consumption.map((point, idx) => (
-              <div key={idx} className="chart-bar-container" title={`${point.date} ${point.label}: Frank ${point.frank_kwh?.toFixed(3) || 0} kWh, P1 Import ${point.p1_import_kwh?.toFixed(3) || 0} kWh`}>
+            {aggregated.map((point, idx) => (
+              <div key={idx} className="chart-bar-container" title={`${point.date}: Frank ${point.frank_kwh?.toFixed(2) || 0} kWh, P1 Import ${point.p1_import_kwh?.toFixed(2) || 0} kWh`}>
                 <div className="chart-bar-wrapper">
                   <div
                     className="chart-bar chart-bar-frank"
@@ -159,13 +200,13 @@ function HistoricalFrankPage() {
           </div>
           <div className="chart-info">
             <p>
-              <strong>Frank totaal:</strong> {consumption.reduce((sum, c) => sum + (c.frank_kwh || 0), 0).toFixed(3)} kWh
+              <strong>Frank totaal:</strong> {aggregated.reduce((sum, c) => sum + (c.frank_kwh || 0), 0).toFixed(2)} kWh
             </p>
             <p>
-              <strong>P1 Import totaal:</strong> {consumption.reduce((sum, c) => sum + (c.p1_import_kwh || 0), 0).toFixed(3)} kWh
+              <strong>P1 Import totaal:</strong> {aggregated.reduce((sum, c) => sum + (c.p1_import_kwh || 0), 0).toFixed(2)} kWh
             </p>
             <p>
-              <strong>P1 Export totaal:</strong> {consumption.reduce((sum, c) => sum + (c.p1_export_kwh || 0), 0).toFixed(3)} kWh
+              <strong>P1 Export totaal:</strong> {aggregated.reduce((sum, c) => sum + (c.p1_export_kwh || 0), 0).toFixed(2)} kWh
             </p>
           </div>
         </div>
@@ -210,6 +251,12 @@ function HistoricalFrankPage() {
           justify-content: space-between;
           align-items: center;
           flex-wrap: wrap;
+        }
+
+        .granularity-controls {
+          display: flex;
+          gap: 0.5rem;
+          align-items: center;
         }
 
         .zoom-controls {
