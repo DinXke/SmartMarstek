@@ -517,21 +517,49 @@ def frank_consumption():
         log.info("Fetching consumption  startDate=%s  endDate=%s  country=%s",
                  start.isoformat(), end.isoformat(), country)
 
-        # Fetch consumption data for each day in range
-        consumption_data = []
+        # Fetch Frank consumption and P1 meter data for each day in range
+        consumption_data = {}
         current_day = start
         while current_day <= end:
-            rows = _fetch_consumption(auth_token, current_day, current_day + timedelta(days=1), country)
-            for row in rows:
-                consumption_data.append({
-                    "date": row.get("from", "").split("T")[0] if row.get("from") else current_day.isoformat(),
-                    "label": row.get("from", "").split("T")[1][:5] if row.get("from") else "00:00",
-                    "value": float(row.get("usage", 0)) if row.get("usage") else 0.0,
-                })
+            day_key = current_day.isoformat()
+
+            # Fetch Frank consumption
+            frank_rows = _fetch_consumption(auth_token, current_day, current_day + timedelta(days=1), country)
+            for row in frank_rows:
+                hour_key = row.get("from", "").split("T")[1][:2] if row.get("from") else "00"
+                label = row.get("from", "").split("T")[1][:5] if row.get("from") else "00:00"
+                if hour_key not in consumption_data:
+                    consumption_data[hour_key] = {
+                        "date": row.get("from", "").split("T")[0] if row.get("from") else day_key,
+                        "label": label,
+                        "frank_kwh": 0.0,
+                        "p1_import_kwh": 0.0,
+                        "p1_export_kwh": 0.0,
+                    }
+                consumption_data[hour_key]["frank_kwh"] = float(row.get("usage", 0)) if row.get("usage") else 0.0
+
+            # Fetch P1 meter data
+            p1_data = query_hourly_import_export_kwh(day_key)
+            for hour_idx, p1_hour_data in p1_data.items():
+                hour_key = f"{hour_idx:02d}"
+                label_hour = f"{hour_idx:02d}:00"
+                if hour_key not in consumption_data:
+                    consumption_data[hour_key] = {
+                        "date": day_key,
+                        "label": label_hour,
+                        "frank_kwh": 0.0,
+                        "p1_import_kwh": 0.0,
+                        "p1_export_kwh": 0.0,
+                    }
+                consumption_data[hour_key]["p1_import_kwh"] = p1_hour_data.get("import_kwh", 0.0)
+                consumption_data[hour_key]["p1_export_kwh"] = p1_hour_data.get("export_kwh", 0.0)
+
             current_day += timedelta(days=1)
 
-        log.debug("Consumption data: %d records", len(consumption_data))
-        return jsonify(consumption_data)
+        # Convert dict to sorted list
+        result = sorted(consumption_data.values(), key=lambda x: (x["date"], x["label"]))
+        log.debug("Consumption data: %d records", len(result))
+        return jsonify(result)
     except Exception as exc:
         log.error("Consumption fetch error: %s", exc, exc_info=True)
         return jsonify({"error": str(exc)}), 502

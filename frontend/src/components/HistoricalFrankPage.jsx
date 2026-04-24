@@ -66,13 +66,16 @@ function HistoricalFrankPage() {
   };
 
   const maxValue = consumption.length > 0
-    ? Math.max(...consumption.map((c) => c.value || 0))
+    ? Math.max(
+        ...consumption.map((c) => c.frank_kwh || 0),
+        ...consumption.map((c) => c.p1_import_kwh || 0)
+      )
     : 100;
 
   return (
     <div className="historical-frank-page">
       <div className="historical-frank-header">
-        <h2>📊 Historische Frank Data</h2>
+        <h2>📊 Historische Frank Data + P1 Verbruik</h2>
         <div className="historical-frank-controls">
           <input
             type="date"
@@ -131,20 +134,38 @@ function HistoricalFrankPage() {
         <div className="historical-frank-chart" style={{ transform: `scale(${zoomLevel})`, transformOrigin: "top center" }}>
           <div className="chart-bars">
             {consumption.map((point, idx) => (
-              <div key={idx} className="chart-bar-container" title={`${point.date}: ${point.value?.toFixed(2) || 0} kWh`}>
-                <div
-                  className="chart-bar"
-                  style={{
-                    height: `${((point.value || 0) / maxValue) * 300}px`,
-                  }}
-                />
+              <div key={idx} className="chart-bar-container" title={`${point.date} ${point.label}: Frank ${point.frank_kwh?.toFixed(3) || 0} kWh, P1 Import ${point.p1_import_kwh?.toFixed(3) || 0} kWh`}>
+                <div className="chart-bar-wrapper">
+                  <div
+                    className="chart-bar chart-bar-frank"
+                    style={{
+                      height: `${((point.frank_kwh || 0) / maxValue) * 300}px`,
+                    }}
+                  />
+                  <div
+                    className="chart-bar chart-bar-p1"
+                    style={{
+                      height: `${((point.p1_import_kwh || 0) / maxValue) * 300}px`,
+                    }}
+                  />
+                </div>
                 <div className="chart-label">{point.label}</div>
               </div>
             ))}
           </div>
+          <div className="chart-legend">
+            <span className="legend-item"><span className="legend-color frank"></span>Frank</span>
+            <span className="legend-item"><span className="legend-color p1"></span>P1 Import</span>
+          </div>
           <div className="chart-info">
             <p>
-              <strong>Totaal verbruik:</strong> {consumption.reduce((sum, c) => sum + (c.value || 0), 0).toFixed(2)} kWh
+              <strong>Frank totaal:</strong> {consumption.reduce((sum, c) => sum + (c.frank_kwh || 0), 0).toFixed(3)} kWh
+            </p>
+            <p>
+              <strong>P1 Import totaal:</strong> {consumption.reduce((sum, c) => sum + (c.p1_import_kwh || 0), 0).toFixed(3)} kWh
+            </p>
+            <p>
+              <strong>P1 Export totaal:</strong> {consumption.reduce((sum, c) => sum + (c.p1_export_kwh || 0), 0).toFixed(3)} kWh
             </p>
           </div>
         </div>
@@ -225,16 +246,37 @@ function HistoricalFrankPage() {
           cursor: pointer;
         }
 
-        .chart-bar {
+        .chart-bar-wrapper {
+          position: relative;
           width: 100%;
-          background: linear-gradient(to top, #3b82f6, #60a5fa);
+          height: 300px;
+          display: flex;
+          align-items: flex-end;
+          gap: 0.1rem;
+        }
+
+        .chart-bar {
+          flex: 1;
           border-radius: 0.25rem 0.25rem 0 0;
           min-height: 2px;
           box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }
 
-        .chart-bar-container:hover .chart-bar {
+        .chart-bar-frank {
+          background: linear-gradient(to top, #3b82f6, #60a5fa);
+        }
+
+        .chart-bar-p1 {
+          background: linear-gradient(to top, #f59e0b, #fbbf24);
+          opacity: 0.7;
+        }
+
+        .chart-bar-container:hover .chart-bar-frank {
           background: linear-gradient(to top, #2563eb, #3b82f6);
+        }
+
+        .chart-bar-container:hover .chart-bar-p1 {
+          opacity: 1;
         }
 
         .chart-label {
@@ -242,6 +284,34 @@ function HistoricalFrankPage() {
           writing-mode: vertical-rl;
           transform: rotate(180deg);
           white-space: nowrap;
+        }
+
+        .chart-legend {
+          display: flex;
+          gap: 2rem;
+          padding: 0.5rem 1rem;
+          font-size: 0.85rem;
+        }
+
+        .legend-item {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+        }
+
+        .legend-color {
+          display: inline-block;
+          width: 12px;
+          height: 12px;
+          border-radius: 0.15rem;
+        }
+
+        .legend-color.frank {
+          background: linear-gradient(to top, #3b82f6, #60a5fa);
+        }
+
+        .legend-color.p1 {
+          background: linear-gradient(to top, #f59e0b, #fbbf24);
         }
 
         .chart-info {
@@ -252,8 +322,16 @@ function HistoricalFrankPage() {
         }
 
         .chart-info p {
-          margin: 0;
+          margin: 0.5rem 0;
           font-size: 0.9rem;
+        }
+
+        .chart-info p:first-child {
+          margin-top: 0;
+        }
+
+        .chart-info p:last-child {
+          margin-bottom: 0;
         }
 
         .empty-state {
