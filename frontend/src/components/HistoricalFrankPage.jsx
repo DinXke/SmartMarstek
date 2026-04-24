@@ -22,7 +22,7 @@ function HistoricalFrankPage() {
     setDebugInfo(null);
     try {
       const res = await fetch(
-        `/api/frank/consumption?startDate=${startDate}&endDate=${endDate}`
+        `api/frank/consumption?startDate=${startDate}&endDate=${endDate}`
       );
       if (!res.ok) {
         let errorDetail = `HTTP ${res.status}`;
@@ -35,7 +35,7 @@ function HistoricalFrankPage() {
         setDebugInfo({
           timestamp: new Date().toLocaleTimeString(),
           status: res.status,
-          url: `/api/frank/consumption?startDate=${startDate}&endDate=${endDate}`,
+          url: `api/frank/consumption?startDate=${startDate}&endDate=${endDate}`,
           error: errorDetail
         });
         throw new Error(errorDetail);
