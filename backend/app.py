@@ -4198,26 +4198,20 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
     if use_service and not svc_str:
         return
 
+    min_w     = int(s.get("pv_limiter_min_w",          0))
     max_w     = int(s.get("pv_limiter_max_w",         4000))
     threshold = float(s.get("pv_limiter_threshold_ct", 0.0)) / 100.0  # € /kWh
-    margin_w  = int(s.get("pv_limiter_margin_w",        200))
 
-    # Find current slot price, consumption estimate, battery SOC and action from plan
-    tz_name     = s.get("timezone", "Europe/Brussels")
-    now_local   = datetime.now(ZoneInfo(tz_name))
-    slots       = _plan_cache.get("slots", [])
-    price       = None
-    cons_w      = 300.0   # fallback: average house load estimate
-    soc_pct     = None
-    slot_action = None    # planned action for current hour
+    # Find current price from plan cache or price cache
+    tz_name   = s.get("timezone", "Europe/Brussels")
+    now_local = datetime.now(ZoneInfo(tz_name))
+    slots     = _plan_cache.get("slots", [])
+    price     = None
     for sl in slots:
         try:
             sl_dt = datetime.fromisoformat(sl["time"])
             if sl_dt.hour == now_local.hour and sl_dt.date() == now_local.date():
-                price       = sl.get("price_eur_kwh")
-                cons_w      = float(sl.get("consumption_wh") or cons_w)
-                soc_pct     = sl.get("soc_start")
-                slot_action = sl.get("action")
+                price = sl.get("price_eur_kwh")
                 break
         except Exception:
             pass
@@ -4227,9 +4221,9 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
         today_key = now_local.date().isoformat()
         cached    = _price_cache.get(today_key)
         if cached:
-            rows       = (cached.get("data") or {}).get("today", [])
-            price_src  = s.get("price_source", "entsoe")
-            markup     = 0.0 if price_src == "frank" else float(s.get("grid_markup_eur_kwh", 0.133))
+            rows      = (cached.get("data") or {}).get("today", [])
+            price_src = s.get("price_source", "entsoe")
+            markup    = 0.0 if price_src == "frank" else float(s.get("grid_markup_eur_kwh", 0.133))
             for row in rows:
                 try:
                     dt_raw = datetime.fromisoformat(row["from"])
@@ -4247,58 +4241,19 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
                   len(slots), list(_price_cache.keys()), now_local.hour)
         return
 
-    if price < threshold:
-        max_charge_kw = float(s.get("max_charge_kw", 3.0))
-        max_soc_pct   = float(s.get("max_soc", 95))
-
-        # Use live SOC from last_soc.json (updated every ~30s by data collector).
-        # Fall back to plan estimate if the file is stale/missing.
-        live_soc: float | None = None
-        try:
-            _soc_file = os.path.join(DATA_DIR, "last_soc.json")
-            with open(_soc_file, encoding="utf-8") as _f:
-                _sc = json.load(_f)
-            if time.time() - _sc.get("ts", 0) < 300:   # accept if < 5 min old
-                live_soc = float(_sc["soc"])
-        except Exception:
-            pass
-        effective_soc = live_soc if live_soc is not None else soc_pct
-
-        bat_full = (effective_soc is not None and effective_soc >= max_soc_pct - 2)
-
-        action_up = (slot_action or "").upper()
-        if bat_full:
-            # Battery is at max SOC — solar only needs to cover house consumption.
-            # Never limit below house consumption (would cause grid import).
-            bat_adj_w = 0
-        elif action_up in ("DISCHARGE", "FORCE_DISCHARGE"):
-            # Battery discharges to house — solar covers only the remainder.
-            bat_adj_w = -int(max_charge_kw * 1000)
-        else:
-            # Battery not full (anti-feed / solar_charge / grid_charge / neutral):
-            # reserve full charging headroom so solar fills the battery.
-            bat_adj_w = int(max_charge_kw * 1000)
-
-        # Floor: always allow at least house consumption worth of solar.
-        target_w = max(int(cons_w), int(cons_w + bat_adj_w + margin_w))
-        target_w = max(0, min(max_w, target_w))
-    else:
-        target_w = max_w   # price OK → full PV output
+    # Negative/cheap price → curtail to min_w; otherwise → full output at max_w
+    target_w = min_w if price < threshold else max_w
 
     last_w = auto.get("pv_limiter_last_w")
-    # Allow 50 W hysteresis to avoid chattering
-    if last_w is not None and abs(last_w - target_w) < 50:
+    if last_w == target_w:
         return
 
-    log.debug("PV limiter: target=%dW price=%.4f threshold=%.4f action=%s → calling HA",
-              target_w, price, threshold, slot_action)
+    log.debug("PV limiter: target=%dW price=%.4f threshold=%.4f → calling HA",
+              target_w, price, threshold)
     ok = _pv_send(s, entity, use_service, svc_str, target_w)
     if ok:
         auto["pv_limiter_last_w"] = target_w
-        log.info("PV limiter → %dW (price=%.4f, cons=%.0fW, bat_chg=%dW, threshold=%.4f)",
-                 target_w, price, cons_w,
-                 int(float(s.get("max_charge_kw", 3.0)) * 1000) if price < threshold else 0,
-                 threshold)
+        log.info("PV limiter → %dW (price=%.4f threshold=%.4f)", target_w, price, threshold)
     else:
         log.warning("PV limiter: HA service call failed (entity=%s service=%s)", entity, svc_str)
 

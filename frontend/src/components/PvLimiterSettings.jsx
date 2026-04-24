@@ -70,6 +70,7 @@ export default function PvLimiterSettings() {
   // Service entity picker (all domains)
   const [svcEntity,     setSvcEntity]     = useState("");
   // Shared
+  const [minW,          setMinW]          = useState(0);
   const [maxW,          setMaxW]          = useState(4000);
   const [thresholdCt,   setThresholdCt]   = useState(0);
   const [marginW,       setMarginW]       = useState(200);
@@ -101,6 +102,7 @@ export default function PvLimiterSettings() {
         const pval = d.pv_limiter_service_param ?? "";
         setParamVal(pval);
         if ((d.pv_limiter_service_param_key ?? "entity_id") === "entity_id") setSvcEntity(pval);
+        setMinW(d.pv_limiter_min_w ?? 0);
         setMaxW(d.pv_limiter_max_w ?? 4000);
         setThresholdCt(d.pv_limiter_threshold_ct ?? 0);
         setMarginW(d.pv_limiter_margin_w ?? 200);
@@ -150,6 +152,7 @@ export default function PvLimiterSettings() {
           pv_limiter_service:           service,
           pv_limiter_service_param_key: paramKey,
           pv_limiter_service_param:     paramVal,
+          pv_limiter_min_w:             Number(minW),
           pv_limiter_max_w:             Number(maxW),
           pv_limiter_threshold_ct:      Number(thresholdCt),
           pv_limiter_margin_w:          Number(marginW),
@@ -307,6 +310,18 @@ export default function PvLimiterSettings() {
           </div>
         </>
       )}
+
+      {/* Min W */}
+      <div className="settings-row">
+        <div>
+          <div className="settings-row-label">Minimaal PV-vermogen (W)</div>
+          <div className="settings-row-desc">
+            Limiet bij negatieve/goedkope prijzen. <strong>0</strong> = productie volledig stoppen.
+          </div>
+        </div>
+        <input className="form-input" type="number" style={{ width: 100 }}
+          value={minW} onChange={(e) => setMinW(e.target.value)} />
+      </div>
 
       {/* Max W */}
       <div className="settings-row">

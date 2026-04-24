@@ -73,9 +73,10 @@ DEFAULT_SETTINGS = {
     # PV power limiter (e.g. SMA Sunny Boy via Home Assistant number entity)
     "pv_limiter_enabled":        False,
     "pv_limiter_entity":         "",     # HA entity_id for number.set_value mode
+    "pv_limiter_min_w":          0,      # limit when price is negative/below threshold (W)
     "pv_limiter_max_w":          4000,   # restore to this value (W) when price OK
     "pv_limiter_threshold_ct":   0.0,    # trigger below this price (ct/kWh); 0 = only negative
-    "pv_limiter_margin_w":       200,    # extra buffer above house+bat load to avoid oscillation
+    "pv_limiter_margin_w":       200,    # extra buffer above house+bat load to avoid oscillation (legacy)
     # Custom HA service mode (e.g. SMA Devices Plus)
     "pv_limiter_use_service":    False,  # True = use custom service instead of number.set_value
     "pv_limiter_service":        "",     # e.g. "pysmaplus.set_value"
