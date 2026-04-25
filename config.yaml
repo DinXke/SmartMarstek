@@ -1,5 +1,5 @@
 name: SmartMarstek
-version: "1.27.10"
+version: "1.27.11"
 slug: smartmarstek
 description: Smart battery management dashboard for Marstek batteries with ENTSO-E price strategy, solar forecast and Home Assistant integration.
 url: https://github.com/DinXke/SmartMarstek

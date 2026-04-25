@@ -198,11 +198,12 @@ def poll_diagnostics(host: str, port: int, unit_id: int) -> dict:
         if "status_code" in result:
             result["status"] = _STATUS_LABELS.get(int(result["status_code"]), f"Code {result['status_code']}")
 
-        # Night mode: connection OK but all measurement registers returned NaN
-        if nan_count > 0 and val_count == 0:
+        # Night mode: connection OK but no measurement values returned
+        # Covers both NaN returns and full READ ERROR situations (Modbus exceptions in standby)
+        if val_count == 0 and result.get("online"):
             result["night_mode"] = True
             result["night_mode_msg"] = (
-                "Omvormer bereikbaar maar alle meetregisters bevatten NaN. "
+                "Omvormer bereikbaar maar alle meetregisters zijn niet beschikbaar. "
                 "Dit is normaal gedrag van SMA-omvormers in nacht/standby-modus. "
                 "Overdag worden hier live waarden getoond."
             )

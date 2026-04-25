@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.27.11] - 2026-04-25
+
+### Fixed
+- **Night-mode detectie in `poll_diagnostics`** ([SCH-737](/SCH/issues/SCH-737)): SMA omvormers in standby gooien Modbus-exceptions (READ ERROR) i.p.v. NaN-waarden — `night_mode` werd dan niet gezet. Fix: conditie gewijzigd van `nan_count > 0 and val_count == 0` naar `val_count == 0 and result.get("online")`, zodat zowel NaN-returns als volledige READ ERROR-situaties correct worden herkend als nacht/standby-modus.
+
 ## [1.27.10] - 2026-04-25
 
 ### Added
