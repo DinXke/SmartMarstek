@@ -5,19 +5,102 @@ services:
     image: influxdb:2.7
     container_name: marstek-influxdb
     restart: unless-stopped
-    ports:
-      - "8086:8086"
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: marstek
-      DOCKER_INFLUXDB_INIT_PASSWORD: marstek2024!
-      DOCKER_INFLUXDB_INIT_ORG: marstek
-      DOCKER_INFLUXDB_INIT_BUCKET: energy
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: marstek-influx-token-local
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_USERNAME:-marstek}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASSWORD:-marstek2024!}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-marstek}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-energy}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_ADMIN_TOKEN:-marstek-influx-token-local}
     volumes:
       - influxdb_data:/var/lib/influxdb2
       - influxdb_config:/etc/influxdb2
+    networks:
+      - marstek-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  smartmarstek:
+    image: ghcr.io/dinxke/smartmarstek/amd64:latest
+    container_name: marstek-app
+    restart: unless-stopped
+    environment:
+      MARSTEK_DATA_DIR: /data
+      MARSTEK_FRONTEND_DIST: /app/frontend/dist
+      STANDALONE_MODE: "true"
+      PYTHONUNBUFFERED: "1"
+      HA_URL: ${HA_URL:-}
+      HA_TOKEN: ${HA_TOKEN:-}
+      ENTSOE_API_KEY: ${ENTSOE_API_KEY:-}
+      ENTSOE_COUNTRY: ${ENTSOE_COUNTRY:-BE}
+      TIMEZONE: ${TIMEZONE:-Europe/Brussels}
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_VERSION: v2
+      INFLUX_ORG: ${INFLUX_ORG:-marstek}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-energy}
+      INFLUX_USERNAME: ${INFLUX_USERNAME:-marstek}
+      INFLUX_PASSWORD: ${INFLUX_PASSWORD:-marstek2024!}
+      INFLUX_ADMIN_TOKEN: ${INFLUX_ADMIN_TOKEN:-marstek-influx-token-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./data:/data
+      - ./config:/app/config
+    ports:
+      - "5000:5000"
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - marstek-net
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: marstek-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost/grafana}
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-gauge-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    depends_on:
+      - influxdb
+    networks:
+      - marstek-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:alpine
+    container_name: marstek-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./data:/data:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - smartmarstek
+      - grafana
+    networks:
+      - marstek-net
 
 volumes:
   influxdb_data:
   influxdb_config:
+  grafana_data:
+
+networks:
+  marstek-net:
+    driver: bridge
