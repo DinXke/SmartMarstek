@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 const DEFAULTS = {
   sma_reader_enabled:    false,
@@ -212,6 +212,111 @@ export default function SmaReaderSettings() {
             </div>
           ) : (
             <span style={{ color: "var(--danger)" }}>Verbinding mislukt — controleer IP en unit ID</span>
+          )}
+        </div>
+      )}
+
+      <SmaScanner host={vals.sma_reader_host} port={vals.sma_reader_port} unitId={vals.sma_reader_unit_id} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Modbus register scanner
+// ---------------------------------------------------------------------------
+
+function SmaScanner({ host }) {
+  const [scanning,  setScanning]  = useState(false);
+  const [progress,  setProgress]  = useState(0);
+  const [results,   setResults]   = useState(null);
+  const [error,     setError]     = useState(null);
+  const pollRef = useRef(null);
+
+  function stopPoll() {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }
+
+  async function startScan() {
+    setScanning(true); setResults(null); setError(null); setProgress(0);
+    try {
+      const r = await fetch("api/sma/scan", { method: "POST" });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.error || "Fout"); }
+    } catch (e) {
+      setError(e.message); setScanning(false); return;
+    }
+    pollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch("api/sma/scan/status");
+        const d = await r.json();
+        setProgress(d.progress ?? 0);
+        if (!d.running) {
+          stopPoll();
+          setScanning(false);
+          if (d.error) setError(d.error);
+          else setResults(d.results ?? []);
+        }
+      } catch { stopPoll(); setScanning(false); }
+    }, 800);
+  }
+
+  return (
+    <div style={{
+      marginTop: 24, padding: "16px", borderRadius: 10,
+      border: "1px solid var(--border)", background: "var(--card)",
+    }}>
+      <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>🔍 Modbus Register Scanner</div>
+      <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
+        Scant alle SMA-registerranges (FC03 + FC04, 30001–31000 en 40001–43100) en toont
+        welke adressen geldige waarden teruggeven. Handig om te achterhalen welke registers
+        jouw omvormer ondersteunt. Duurt ±30–90 seconden.
+      </p>
+
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <button className="btn btn-secondary" onClick={startScan}
+          disabled={scanning || !host}
+          title={!host ? "Vul eerst een IP-adres in" : ""}>
+          {scanning ? `Scannen… (${progress}%)` : "Start scan"}
+        </button>
+        {scanning && (
+          <div style={{ flex: 1, maxWidth: 200, height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}>
+            <div style={{ width: `${progress}%`, height: "100%", borderRadius: 3, background: "#ffd600", transition: "width .3s" }} />
+          </div>
+        )}
+        {error && <span style={{ color: "var(--danger)", fontSize: 13 }}>{error}</span>}
+      </div>
+
+      {results !== null && (
+        <div>
+          <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 8 }}>
+            {results.length === 0
+              ? "Geen registers met geldige waarden gevonden."
+              : `${results.length} register(s) gevonden:`}
+          </div>
+          {results.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "monospace" }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--text-muted)" }}>
+                    <th style={{ textAlign: "left", padding: "4px 8px" }}>Reg</th>
+                    <th style={{ textAlign: "left", padding: "4px 8px" }}>FC</th>
+                    <th style={{ textAlign: "left", padding: "4px 8px" }}>Raw waarde</th>
+                    <th style={{ textAlign: "left", padding: "4px 8px" }}>Hex</th>
+                    <th style={{ textAlign: "left", padding: "4px 8px" }}>Bekende naam</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.map((r, i) => (
+                    <tr key={i} style={{ borderBottom: "1px solid var(--border)", background: r.label ? "rgba(255,214,0,.04)" : "transparent" }}>
+                      <td style={{ padding: "3px 8px", color: r.label ? "#ffd600" : "var(--text)", fontWeight: r.label ? 600 : 400 }}>{r.reg}</td>
+                      <td style={{ padding: "3px 8px", color: "var(--text-muted)" }}>FC0{r.fc}</td>
+                      <td style={{ padding: "3px 8px" }}>{r.raw}</td>
+                      <td style={{ padding: "3px 8px", color: "var(--text-muted)" }}>{r.hex}</td>
+                      <td style={{ padding: "3px 8px", color: r.label ? "#ffd600" : "var(--text-muted)" }}>{r.label || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}

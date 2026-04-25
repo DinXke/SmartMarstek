@@ -380,3 +380,122 @@ def start_sma_reader(get_settings_fn, interval: int = 10) -> threading.Thread:
     )
     t.start()
     return t
+
+
+# ---------------------------------------------------------------------------
+# Modbus register scanner
+# ---------------------------------------------------------------------------
+
+# Well-known SMA register labels (1-based) for annotation in scan results
+_KNOWN_REGS: dict[int, str] = {
+    30775: "Pac (AC vermogen, W)",
+    30531: "E-Total (totaalopbrengst, Wh)",
+    30535: "E-Day (dagopbrengst, Wh)",
+    30783: "Uac L1 (netspanning, 0.01V)",
+    30803: "Freq / status",
+    30541: "Bedrijfstijd (s)",
+    30953: "Interne temperatuur (0.1°C)",
+    30225: "Isolatieweerstand",
+    30201: "Apparaatstatus",
+    30233: "Foutcode",
+    30517: "E-Total alternatief (Wh)",
+    30529: "DC-vermogen string 1 (W)",
+    30533: "DC-spanning string 1 (0.01V)",
+    30581: "Uac L1 alternatief (0.01V)",
+    30977: "Frequentie alternatief (0.01Hz)",
+    40185: "Max schijnbaar vermogen (VA)",
+    40195: "Schijnbaar vermogensgrens (VA)",
+    40210: "Modus netinvoerbeheer",
+    40212: "Actief vermogenslimiet P",
+    40214: "Actief vermogenslimiet config",
+    40236: "WMaxLimPct (%)",
+    40915: "Ingestelde vermogensgrens",
+    42062: "WMaxLim — PV limiter (W)",
+}
+
+# SMA register ranges worth scanning (start_addr_0based, count, fc)
+_SCAN_RANGES = [
+    # FC04 input registers — measurement data
+    (30000, 1000, 4),   # 30001–31000: main measurement block
+    # FC03 holding registers — measurements + control
+    (30000, 1000, 3),   # 30001–31000 via FC03
+    (40000,  500, 3),   # 40001–40500: control registers
+    (40900,  200, 3),   # 40901–41100: extended control
+    (42000,  100, 3),   # 42001–42100: WMaxLim area
+]
+
+_BLOCK = 10  # registers per read attempt
+
+
+def scan_registers(host: str, port: int, unit_id: int,
+                   progress_cb=None) -> list[dict]:
+    """
+    Scan all SMA register ranges via FC03 and FC04.
+    Returns a list of dicts for every register address that returned a
+    non-NaN, non-error value.
+
+    progress_cb(done, total) is called after each block if provided.
+    This call is synchronous and may take 30–90 seconds depending on the
+    inverter's response speed.
+    """
+    try:
+        from pymodbus.client import ModbusTcpClient
+    except ImportError:
+        return []
+
+    client = ModbusTcpClient(host=host, port=port, timeout=3)
+    if not client.connect():
+        return []
+
+    found: list[dict] = []
+    total_blocks = sum((count // _BLOCK + 1) for _, count, _ in _SCAN_RANGES)
+    done_blocks  = 0
+
+    try:
+        for range_start, range_count, fc in _SCAN_RANGES:
+            addr = range_start
+            end  = range_start + range_count
+            while addr < end:
+                batch = min(_BLOCK, end - addr)
+                try:
+                    if fc == 3:
+                        result = client.read_holding_registers(
+                            address=addr, count=batch, slave=unit_id
+                        )
+                    else:
+                        result = client.read_input_registers(
+                            address=addr, count=batch, slave=unit_id
+                        )
+                    if not (hasattr(result, "isError") and result.isError()):
+                        regs = result.registers
+                        for i, raw in enumerate(regs):
+                            reg_1based = addr + i + 1  # back to 1-based for display
+                            if raw in (0xFFFF, 0x8000, 0xFFFFFFFF, 0x80000000):
+                                continue  # NaN sentinel
+                            found.append({
+                                "reg":   reg_1based,
+                                "addr":  addr + i,
+                                "fc":    fc,
+                                "raw":   raw,
+                                "hex":   f"0x{raw:04X}",
+                                "label": _KNOWN_REGS.get(reg_1based, ""),
+                            })
+                except Exception:
+                    pass
+                addr += batch
+                done_blocks += 1
+                if progress_cb:
+                    progress_cb(done_blocks, total_blocks)
+    finally:
+        client.close()
+
+    # Deduplicate: keep first occurrence per (reg, fc)
+    seen: set = set()
+    unique: list[dict] = []
+    for item in found:
+        key = (item["reg"], item["fc"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    return sorted(unique, key=lambda x: (x["reg"], x["fc"]))

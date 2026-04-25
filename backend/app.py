@@ -2614,6 +2614,63 @@ def get_sma_live_data():
     return jsonify(data)
 
 
+_sma_scan_state: dict = {"running": False, "done": 0, "total": 0, "results": None, "error": None}
+_sma_scan_lock = threading.Lock()
+
+
+@app.route("/api/sma/scan", methods=["POST"])
+def start_sma_scan():
+    """Start a background Modbus register scan. Poll /api/sma/scan/status for progress."""
+    with _sma_scan_lock:
+        if _sma_scan_state["running"]:
+            return jsonify({"error": "Scan is al bezig"}), 409
+
+    s    = load_strategy_settings()
+    host = (s.get("sma_reader_host") or "").strip()
+    port = int(s.get("sma_reader_port", 502))
+    uid  = int(s.get("sma_reader_unit_id", 3))
+    if not host:
+        return jsonify({"error": "sma_reader_host niet geconfigureerd"}), 400
+
+    def _run():
+        from sma_modbus import scan_registers
+        with _sma_scan_lock:
+            _sma_scan_state.update({"running": True, "done": 0, "total": 0, "results": None, "error": None})
+        try:
+            def _progress(done, total):
+                with _sma_scan_lock:
+                    _sma_scan_state["done"]  = done
+                    _sma_scan_state["total"] = total
+            results = scan_registers(host, port, uid, progress_cb=_progress)
+            with _sma_scan_lock:
+                _sma_scan_state["results"] = results
+        except Exception as exc:
+            with _sma_scan_lock:
+                _sma_scan_state["error"] = str(exc)
+        finally:
+            with _sma_scan_lock:
+                _sma_scan_state["running"] = False
+
+    threading.Thread(target=_run, daemon=True, name="sma-scan").start()
+    return jsonify({"started": True})
+
+
+@app.route("/api/sma/scan/status")
+def sma_scan_status():
+    """Return current scan progress and results when done."""
+    with _sma_scan_lock:
+        state = dict(_sma_scan_state)
+    pct = int(state["done"] / state["total"] * 100) if state["total"] else 0
+    return jsonify({
+        "running":  state["running"],
+        "progress": pct,
+        "done":     state["done"],
+        "total":    state["total"],
+        "results":  state["results"],
+        "error":    state["error"],
+    })
+
+
 @app.route("/api/sma/test", methods=["POST"])
 def test_sma_connection():
     """Trigger an on-demand diagnostic poll and return detailed results."""
