@@ -842,47 +842,9 @@ def frank_consumption():
                         "till": row.get("till"),
                         "frank_kwh": 0.0,
                         "frank_cost_eur": 0.0,
-                        "p1_import_kwh": 0.0,
-                        "p1_export_kwh": 0.0,
                     }
                 consumption_data[record_key]["frank_kwh"] = float(row.get("usage") or 0)
                 consumption_data[record_key]["frank_cost_eur"] = float(row.get("costs") or 0)
-
-            # Fetch P1 meter data.
-            # Priority: (1) local InfluxDB cumulative counters (spread()),
-            #           (2) HA history for HomeWizard P1 entities,
-            #           (3) external InfluxDB net_w as last-resort proxy.
-            p1_data = query_hourly_import_export_kwh(day_key, tz_name)
-            log.debug("P1 local InfluxDB for %s: %d hours", day_key, len(p1_data))
-            if not p1_data:
-                p1_data = _query_p1_via_ha_history(day_key, tz_name)
-                log.debug("P1 via HA history for %s: %d hours", day_key, len(p1_data))
-            if not p1_data:
-                ext = _query_profit_day(day_key, tz_name)
-                if ext:
-                    log.debug("P1 fallback external InfluxDB for %s: %d hours", day_key, len(ext))
-                    p1_data = {
-                        h: {
-                            "import_kwh": max(0.0, float(hd.get("net_w") or 0.0)) / 1000.0,
-                            "export_kwh": max(0.0, -float(hd.get("net_w") or 0.0)) / 1000.0,
-                        }
-                        for h, hd in ext.items()
-                        if "net_w" in hd
-                    }
-            for hour_idx, p1_hour_data in p1_data.items():
-                label_hour = f"{hour_idx:02d}:00"
-                record_key = f"{day_key}_{label_hour}"
-                if record_key not in consumption_data:
-                    consumption_data[record_key] = {
-                        "date": day_key,
-                        "label": label_hour,
-                        "frank_kwh": 0.0,
-                        "frank_cost_eur": 0.0,
-                        "p1_import_kwh": 0.0,
-                        "p1_export_kwh": 0.0,
-                    }
-                consumption_data[record_key]["p1_import_kwh"] = p1_hour_data.get("import_kwh", 0.0)
-                consumption_data[record_key]["p1_export_kwh"] = p1_hour_data.get("export_kwh", 0.0)
 
         # Convert dict to sorted list
         result = sorted(consumption_data.values(), key=lambda x: (x["date"], x["label"]))
