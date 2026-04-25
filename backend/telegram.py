@@ -59,7 +59,7 @@ def notify_event(
         return None
 
     events_cfg: dict = s.get("telegram_events", {})
-    if event_type in events_cfg and not events_cfg[event_type]:
+    if event_type != "test" and event_type in events_cfg and not events_cfg[event_type]:
         return None
 
     approval_id: Optional[str] = None

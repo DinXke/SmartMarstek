@@ -2616,15 +2616,15 @@ def get_sma_live_data():
 
 @app.route("/api/sma/test", methods=["POST"])
 def test_sma_connection():
-    """Trigger an immediate on-demand poll and return the result."""
-    from sma_modbus import _poll
+    """Trigger an on-demand diagnostic poll and return detailed results."""
+    from sma_modbus import poll_diagnostics
     s    = load_strategy_settings()
     host = (s.get("sma_reader_host") or "").strip()
     port = int(s.get("sma_reader_port", 502))
     uid  = int(s.get("sma_reader_unit_id", 3))
     if not host:
         return jsonify({"error": "sma_reader_host niet geconfigureerd"}), 400
-    result = _poll(host, port, uid)
+    result = poll_diagnostics(host, port, uid)
     return jsonify(result)
 
 
@@ -2666,6 +2666,21 @@ def _push_reserve_to_all_devices(settings: dict) -> None:
 # ---------------------------------------------------------------------------
 # Telegram callback endpoint
 # ---------------------------------------------------------------------------
+
+@app.route("/api/telegram/test", methods=["POST"])
+def telegram_test():
+    """Send a test notification to verify Telegram config."""
+    s = load_strategy_settings()
+    if not s.get("telegram_enabled"):
+        return jsonify({"error": "Telegram is niet ingeschakeld"}), 400
+    if not (s.get("telegram_chat_id") or "").strip():
+        return jsonify({"error": "Geen chat_id geconfigureerd"}), 400
+    try:
+        _tg_notify("test", {"message": "✓ SmartMarstek Telegram werkt correct."}, settings=s)
+        return jsonify({"ok": True})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
 
 @app.route("/api/telegram/callback", methods=["POST"])
 def telegram_callback():

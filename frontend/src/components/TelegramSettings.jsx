@@ -46,10 +46,12 @@ function Toggle({ on, onChange }) {
 }
 
 export default function TelegramSettings() {
-  const [vals,    setVals]    = useState(DEFAULTS);
-  const [saving,  setSaving]  = useState(false);
-  const [success, setSuccess] = useState(false);
-  const [error,   setError]   = useState(null);
+  const [vals,       setVals]       = useState(DEFAULTS);
+  const [saving,     setSaving]     = useState(false);
+  const [success,    setSuccess]    = useState(false);
+  const [error,      setError]      = useState(null);
+  const [testing,    setTesting]    = useState(false);
+  const [testResult, setTestResult] = useState(null);
 
   useEffect(() => {
     fetch("api/strategy/settings")
@@ -92,6 +94,20 @@ export default function TelegramSettings() {
       setError(e.message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function sendTest() {
+    setTesting(true); setTestResult(null);
+    try {
+      const r = await fetch("api/telegram/test", { method: "POST" });
+      const d = await r.json();
+      setTestResult(d.ok ? "ok" : (d.error || "Onbekende fout"));
+    } catch (e) {
+      setTestResult(e.message);
+    } finally {
+      setTesting(false);
+      setTimeout(() => setTestResult(null), 5000);
     }
   }
 
@@ -143,12 +159,19 @@ export default function TelegramSettings() {
           style={{ width: 100 }} />
       </Row>
 
-      <div style={{ marginTop: 16, display: "flex", gap: 10, alignItems: "center" }}>
+      <div style={{ marginTop: 16, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
         <button className="btn-primary" onClick={save} disabled={saving}>
           {saving ? "Opslaan…" : "Opslaan"}
         </button>
+        <button className="btn btn-secondary" onClick={sendTest}
+          disabled={testing || !vals.telegram_enabled || !vals.telegram_chat_id}
+          title={!vals.telegram_enabled ? "Telegram is uitgeschakeld" : !vals.telegram_chat_id ? "Vul een chat ID in" : ""}>
+          {testing ? "Versturen…" : "Test versturen"}
+        </button>
         {success && <span style={{ color: "#4ade80", fontSize: 13 }}>✓ Opgeslagen</span>}
         {error   && <span style={{ color: "#f87171", fontSize: 13 }}>{error}</span>}
+        {testResult === "ok" && <span style={{ color: "#4ade80", fontSize: 13 }}>✓ Test verzonden</span>}
+        {testResult && testResult !== "ok" && <span style={{ color: "#f87171", fontSize: 13 }}>Fout: {testResult}</span>}
       </div>
     </div>
   );
