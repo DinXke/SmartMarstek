@@ -110,6 +110,16 @@ function ThemeToggle() {
   const current = THEMES.find((t) => t.id === theme) || THEMES[0];
   const detailsRef = useRef(null);
 
+  useEffect(() => {
+    const handler = (e) => {
+      if (detailsRef.current && !detailsRef.current.contains(e.target)) {
+        detailsRef.current.open = false;
+      }
+    };
+    document.addEventListener("click", handler, true);
+    return () => document.removeEventListener("click", handler, true);
+  }, []);
+
   function pick(id) {
     setTheme(id);
     if (detailsRef.current) detailsRef.current.open = false;
