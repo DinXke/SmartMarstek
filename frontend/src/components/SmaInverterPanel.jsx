@@ -75,14 +75,13 @@ export default function SmaInverterPanel({ refreshTick }) {
   // Never fully hide — always show so user can discover the feature
 
   const online  = data?.online ?? false;
+  const status  = null; // status removed from live data — shown via InfluxDB
   const pac     = data?.pac_w;
   const eDay    = data?.e_day_wh;
   const eTotal  = data?.e_total_wh;
   const gridV   = data?.grid_v;
   const freqHz  = data?.freq_hz;
-  const dcP     = data?.dc_power_w;
-  const dcV     = data?.dc_voltage_v;
-  const status  = data?.status;
+  const tempC   = data?.temp_c;
   const ageS    = data?.age_s;
 
   return (
@@ -151,10 +150,8 @@ export default function SmaInverterPanel({ refreshTick }) {
                 display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 16px",
               }}>
                 <Stat label="Netspanning" value={gridV} unit="V" />
-                <Stat label="Frequentie"  value={freqHz} unit="Hz" />
-                <Stat label="DC-vermogen" value={fmtW(dcP)} unit={wUnit(dcP)} />
-                <Stat label="DC-spanning" value={dcV} unit="V" />
-                <Stat label="Status"      value={status} />
+                <Stat label="Frequentie"  value={freqHz != null ? freqHz.toFixed(2) : null} unit="Hz" />
+                <Stat label="Temperatuur" value={tempC} unit="°C" />
                 {ageS != null && (
                   <div style={{ textAlign: "center", minWidth: 80 }}>
                     <div style={{ fontSize: 11, color: MUTED, marginBottom: 2, textTransform: "uppercase", letterSpacing: "0.05em" }}>

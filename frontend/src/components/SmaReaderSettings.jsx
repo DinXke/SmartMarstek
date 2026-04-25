@@ -107,7 +107,7 @@ export default function SmaReaderSettings() {
         <Toggle on={vals.sma_reader_enabled} onChange={(v) => patch("sma_reader_enabled", v)} />
       </Row>
 
-      <Row label="IP-adres omvormer" desc="Hetzelfde als PV Limiter indien van toepassing">
+      <Row label="IP-adres omvormer" desc="Let op: dit kan afwijken van het PV Limiter IP (bv. .141 vs .142)">
         <input className="form-input" style={{ width: 200 }}
           placeholder="192.168.1.x"
           value={vals.sma_reader_host}
@@ -153,26 +153,62 @@ export default function SmaReaderSettings() {
       {testResult && (
         <div style={{
           marginTop: 16, padding: "12px 16px", borderRadius: 8,
-          background: testResult.online ? "rgba(0,230,100,.08)" : "rgba(255,80,80,.08)",
-          border: `1px solid ${testResult.online ? "var(--success)" : "var(--danger)"}`,
+          background: testResult.online
+            ? testResult.night_mode ? "rgba(255,214,0,.06)" : "rgba(0,230,100,.08)"
+            : "rgba(255,80,80,.08)",
+          border: `1px solid ${testResult.online
+            ? testResult.night_mode ? "rgba(255,214,0,.35)" : "var(--success)"
+            : "var(--danger)"}`,
           fontSize: 13,
         }}>
-          {testResult.error ? (
-            <span style={{ color: "var(--danger)" }}>Fout: {testResult.error}</span>
+          {testResult.error && !testResult.online ? (
+            <span style={{ color: "var(--danger)" }}>Verbinding mislukt: {testResult.error}</span>
           ) : testResult.online ? (
             <div>
-              <div style={{ fontWeight: 600, color: "var(--success)", marginBottom: 8 }}>
-                ✓ Verbinding geslaagd
+              <div style={{ fontWeight: 600, marginBottom: 8,
+                color: testResult.night_mode ? "#ffd600" : "var(--success)" }}>
+                {testResult.night_mode ? "🌙 Verbinding OK — omvormer in nachtmodus" : "✓ Verbinding geslaagd"}
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px" }}>
-                <span>AC-vermogen</span><span><strong>{testResult.pac_w ?? "—"} W</strong></span>
-                <span>Dagopbrengst</span><span><strong>{testResult.e_day_wh != null ? (testResult.e_day_wh / 1000).toFixed(2) + " kWh" : "—"}</strong></span>
-                <span>Netspanning</span><span><strong>{testResult.grid_v ?? "—"} V</strong></span>
-                <span>Frequentie</span><span><strong>{testResult.freq_hz ?? "—"} Hz</strong></span>
-                <span>DC-vermogen</span><span><strong>{testResult.dc_power_w ?? "—"} W</strong></span>
-                <span>DC-spanning</span><span><strong>{testResult.dc_voltage_v ?? "—"} V</strong></span>
-                <span>Status</span><span><strong>{testResult.status ?? "—"}</strong></span>
+
+              {testResult.night_mode && (
+                <div style={{ marginBottom: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+                  {testResult.night_mode_msg}
+                </div>
+              )}
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px", marginBottom: 12 }}>
+                <span>AC-vermogen</span><span><strong>{testResult.pac_w != null ? testResult.pac_w + " W" : "— (nacht)"}</strong></span>
+                <span>Dagopbrengst</span><span><strong>{testResult.e_day_wh != null ? (testResult.e_day_wh / 1000).toFixed(2) + " kWh" : "— (nacht)"}</strong></span>
+                <span>Netspanning</span><span><strong>{testResult.grid_v != null ? testResult.grid_v + " V" : "— (nacht)"}</strong></span>
+                <span>Frequentie</span><span><strong>{testResult.freq_hz != null ? testResult.freq_hz + " Hz" : "— (nacht)"}</strong></span>
+                <span>DC-vermogen</span><span><strong>{testResult.dc_power_w != null ? testResult.dc_power_w + " W" : "— (nacht)"}</strong></span>
+                <span>DC-spanning</span><span><strong>{testResult.dc_voltage_v != null ? testResult.dc_voltage_v + " V" : "— (nacht)"}</strong></span>
+                <span>Status</span><span><strong>{testResult.status ?? "— (nacht)"}</strong></span>
               </div>
+
+              {/* Raw register diagnostics */}
+              {testResult.raw && Object.keys(testResult.raw).length > 0 && (
+                <details style={{ marginTop: 8 }}>
+                  <summary style={{ cursor: "pointer", color: "var(--text-muted)", fontSize: 12 }}>
+                    🔍 Raw registerwaarden tonen
+                  </summary>
+                  <div style={{
+                    marginTop: 8, fontFamily: "monospace", fontSize: 11,
+                    background: "var(--bg)", padding: "8px 10px", borderRadius: 6,
+                    overflowX: "auto",
+                  }}>
+                    {Object.entries(testResult.raw).map(([k, v]) => (
+                      <div key={k} style={{ marginBottom: 3 }}>
+                        <span style={{ color: "var(--text-muted)" }}>FC{v.fc} addr={v.addr}:</span>{" "}
+                        <span style={{ color: v.nan ? "#ffa000" : v.value != null ? "var(--success)" : "var(--danger)" }}>
+                          {v.status === "read_error" ? "READ ERROR" : v.nan ? `NaN (${(v.regs||[]).join(",")})` : `${v.value} (${(v.regs||[]).join(",")})`}
+                        </span>{" "}
+                        <span style={{ color: "var(--text-muted)" }}>← {k}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
             </div>
           ) : (
             <span style={{ color: "var(--danger)" }}>Verbinding mislukt — controleer IP en unit ID</span>

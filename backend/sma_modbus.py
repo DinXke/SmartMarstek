@@ -40,17 +40,15 @@ _SMA_U64_NAN: int = 0x8000_0000_0000_0000
 # ---------------------------------------------------------------------------
 
 _sma_live: dict = {
-    "ts":           0.0,
-    "pac_w":        None,
-    "e_day_wh":     None,
-    "e_total_wh":   None,
-    "grid_v":       None,
-    "freq_hz":      None,
-    "dc_power_w":   None,
-    "dc_voltage_v": None,
-    "status_code":  None,
-    "status":       None,
-    "online":       False,
+    "ts":          0.0,
+    "pac_w":       None,
+    "e_day_wh":    None,
+    "e_total_wh":  None,
+    "grid_v":      None,
+    "freq_hz":     None,
+    "temp_c":      None,
+    "op_time_s":   None,
+    "online":      False,
 }
 _sma_lock = threading.Lock()
 
@@ -108,6 +106,102 @@ def _read_input(client, address: int, count: int, unit_id: int) -> Optional[list
         return None
 
 
+def _read_holding(client, address: int, count: int, unit_id: int) -> Optional[list]:
+    """Read `count` holding registers (FC03) starting at 0-based `address`."""
+    try:
+        result = client.read_holding_registers(
+            address=address, count=count, slave=unit_id
+        )
+        if hasattr(result, "isError") and result.isError():
+            log.debug("SMA FC03 error  addr=%d  unit=%d: %s", address, unit_id, result)
+            return None
+        return result.registers
+    except Exception as exc:
+        log.debug("SMA FC03 exception  addr=%d: %s", address, exc)
+        return None
+
+
+def poll_diagnostics(host: str, port: int, unit_id: int) -> dict:
+    """
+    Extended diagnostic poll: tries multiple register ranges and function codes.
+    Returns raw register values to help debug register map issues.
+    Used by /api/sma/test.
+    """
+    try:
+        from pymodbus.client import ModbusTcpClient
+    except ImportError:
+        return {"online": False, "error": "pymodbus niet geïnstalleerd"}
+
+    client = ModbusTcpClient(host=host, port=port, timeout=5)
+    if not client.connect():
+        return {"online": False, "error": f"Kan niet verbinden met {host}:{port}"}
+
+    result: dict = {"online": True, "raw": {}, "unit_id": unit_id}
+
+    # Register map validated against Loxone config for SMA Sunny Boy AV 4.0
+    # (reg, count, type, scale, fc)  — addr = reg - 1 (0-based)
+    PROBES_FC03 = [  # holding registers
+        ("pac_w",      30774, 2, "S32",   1),   # reg 30775 — Pac
+        ("grid_v",     30782, 2, "U32", 100),   # reg 30783 — Uac L1 (0.01 V)
+        ("temp_c",     30952, 2, "S32",  10),   # reg 30953 — Internal temp (0.1°C)
+        ("wmax_lim_w", 42061, 2, "U32",   1),   # reg 42062 — WMaxLim (PV limiter)
+        ("wmax_lim_pct",40235,2, "U32",   1),   # reg 40236 — WMaxLimPct
+    ]
+    PROBES_FC04 = [  # input registers
+        ("e_day_wh",   30534, 2, "U32",   1),   # reg 30535 — E-Day (Wh)
+        ("e_total_wh", 30530, 2, "U32",   1),   # reg 30531 — E-Total (Wh)
+        ("freq_hz",    30802, 2, "U32", 100),   # reg 30803 — Grid freq (0.01 Hz)
+        ("op_time_s",  30540, 2, "U32",   1),   # reg 30541 — Operating time (s)
+        ("insulation", 30224, 2, "U32",   1),   # reg 30225 — Insulation resistance
+    ]
+
+    nan_count = 0
+    val_count = 0
+
+    def _probe(key, addr, cnt, dtype, scale, fc):
+        nonlocal nan_count, val_count
+        regs = _read_holding(client, addr, cnt, unit_id) if fc == 3 else _read_input(client, addr, cnt, unit_id)
+        if regs is None:
+            result["raw"][key] = {"fc": fc, "addr": addr + 1, "status": "read_error"}
+            return None
+        raw_hex = [f"0x{r:04X}" for r in regs]
+        if dtype == "U32":
+            parsed = _to_u32(regs, 0)
+        elif dtype == "S32":
+            parsed = _to_s32(regs, 0)
+        else:
+            parsed = _to_u64(regs, 0)
+        val = round(parsed / scale, 2) if parsed is not None and scale > 1 else parsed
+        is_nan = parsed is None
+        result["raw"][key] = {"fc": fc, "addr": addr + 1, "regs": raw_hex, "value": val, "nan": is_nan}
+        if is_nan:
+            nan_count += 1
+        elif val is not None:
+            val_count += 1
+            result[key] = val
+        return val
+
+    try:
+        for key, addr, cnt, dtype, scale in PROBES_FC03:
+            _probe(key, addr, cnt, dtype, scale, 3)
+        for key, addr, cnt, dtype, scale in PROBES_FC04:
+            _probe(key, addr, cnt, dtype, scale, 4)
+
+        # Night mode: connection OK but all measurement registers returned NaN
+        if nan_count > 0 and val_count == 0:
+            result["night_mode"] = True
+            result["night_mode_msg"] = (
+                "Omvormer bereikbaar maar alle meetregisters bevatten NaN. "
+                "Dit is normaal gedrag van SMA-omvormers in nacht/standby-modus. "
+                "Overdag worden hier live waarden getoond."
+            )
+
+    finally:
+        client.close()
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Main poll
 # ---------------------------------------------------------------------------
@@ -125,6 +219,9 @@ def _poll(host: str, port: int, unit_id: int) -> dict:
         log.error("pymodbus niet geïnstalleerd")
         return {"online": False}
 
+    # Register map validated against Loxone config for SMA Sunny Boy AV 4.0
+    # FC03 = holding registers, FC04 = input registers
+    # Addresses are 0-based (SMA 1-based reg - 1)
     client = ModbusTcpClient(host=host, port=port, timeout=5)
     if not client.connect():
         log.warning("SMA Modbus: kan niet verbinden met %s:%d", host, port)
@@ -132,52 +229,43 @@ def _poll(host: str, port: int, unit_id: int) -> dict:
 
     data: dict = {"online": True}
     try:
-        # Pac (AC total power)  — reg 30775, S32, W
-        r = _read_input(client, 30774, 2, unit_id)
+        # Pac — reg 30775, FC03, S32, W
+        r = _read_holding(client, 30774, 2, unit_id)
         if r is not None:
             data["pac_w"] = _to_s32(r, 0)
 
-        # E-Day (today's yield)  — reg 30535, U32, Wh
+        # E-Day — reg 30535, FC04, U32, Wh
         r = _read_input(client, 30534, 2, unit_id)
         if r is not None:
             data["e_day_wh"] = _to_u32(r, 0)
 
-        # E-Total (lifetime yield)  — reg 30517, U64, Wh
-        r = _read_input(client, 30516, 4, unit_id)
+        # E-Total — reg 30531, FC04, U32, Wh
+        r = _read_input(client, 30530, 2, unit_id)
         if r is not None:
-            data["e_total_wh"] = _to_u64(r, 0)
+            data["e_total_wh"] = _to_u32(r, 0)
 
-        # Grid voltage L1  — reg 30581, U32, 0.01 V
-        r = _read_input(client, 30580, 2, unit_id)
+        # Grid voltage L1 — reg 30783, FC03, U32, 0.01 V
+        r = _read_holding(client, 30782, 2, unit_id)
         if r is not None:
             v = _to_u32(r, 0)
             data["grid_v"] = round(v / 100, 2) if v is not None else None
 
-        # Grid frequency  — reg 30977, U32, 0.01 Hz
-        r = _read_input(client, 30976, 2, unit_id)
+        # Grid frequency — reg 30803, FC04, U32, 0.01 Hz
+        r = _read_input(client, 30802, 2, unit_id)
         if r is not None:
             f = _to_u32(r, 0)
             data["freq_hz"] = round(f / 100, 2) if f is not None else None
 
-        # DC power string 1  — reg 30529, S32, W
-        r = _read_input(client, 30528, 2, unit_id)
+        # Internal temperature — reg 30953, FC03, S32, 0.1 °C
+        r = _read_holding(client, 30952, 2, unit_id)
         if r is not None:
-            data["dc_power_w"] = _to_s32(r, 0)
+            t = _to_s32(r, 0)
+            data["temp_c"] = round(t / 10, 1) if t is not None else None
 
-        # DC voltage string 1  — reg 30533, U32, 0.01 V
-        r = _read_input(client, 30532, 2, unit_id)
+        # Operating time — reg 30541, FC04, U32, s
+        r = _read_input(client, 30540, 2, unit_id)
         if r is not None:
-            v = _to_u32(r, 0)
-            data["dc_voltage_v"] = round(v / 100, 2) if v is not None else None
-
-        # Operating status  — reg 30803, U32
-        r = _read_input(client, 30802, 2, unit_id)
-        if r is not None:
-            code = _to_u32(r, 0)
-            data["status_code"] = code
-            data["status"] = (
-                _STATUS_LABELS.get(code, f"Code {code}") if code is not None else None
-            )
+            data["op_time_s"] = _to_u32(r, 0)
 
     finally:
         client.close()
