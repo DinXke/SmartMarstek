@@ -4915,7 +4915,7 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
             auto.pop("pv_limiter_last_w", None)
             return
         # Rolling cap override active even when pv_limiter price logic is disabled
-        if not use_service and not entity:
+        if not use_service and not entity and not s.get("pv_limiter_use_modbus"):
             return
         if use_service and not svc_str:
             return
@@ -4930,7 +4930,7 @@ def _apply_pv_limiter(s: dict, auto: dict) -> None:
         return
 
     # In entity mode, entity is required; in service mode, the service string is required
-    if not use_service and not entity:
+    if not use_service and not entity and not s.get("pv_limiter_use_modbus"):
         return
     if use_service and not svc_str:
         return
