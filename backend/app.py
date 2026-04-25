@@ -455,11 +455,12 @@ def _fetch_consumption(auth_token: str | None, start: date, end: date,
             cache_key = auth_token[:16]
 
             # Get site reference (in-process cache)
+            # NOTE: userSites must NOT use x-country header (causes auth-not-authorised)
             site_ref = _be_site_ref_cache.get(cache_key)
             if not site_ref:
                 try:
                     sr_data = _frank_request(_QUERY_USER_SITES, {},
-                                             auth_token=auth_token, country="BE")
+                                             auth_token=auth_token, country="NL")
                     sites = sr_data.get("userSites") or []
                     site_ref = sites[0].get("reference") if sites else None
                     if site_ref:
@@ -660,21 +661,50 @@ def frank_consumption_test():
         yesterday = today - timedelta(days=1)
         month_start = date(yesterday.year, yesterday.month, 1)
 
-        # Step 1: get userSites (needed for BE siteReference)
-        sites_result = {}
+        # Check token expiry from JWT payload
+        token_info = {}
+        try:
+            import base64, json as _json
+            payload_b64 = auth_token.split(".")[1]
+            payload_b64 += "=" * (-len(payload_b64) % 4)
+            payload = _json.loads(base64.b64decode(payload_b64))
+            exp = payload.get("exp", 0)
+            token_info = {
+                "exp": exp,
+                "expired": exp < int(time.time()),
+                "expires_in_sec": exp - int(time.time()),
+            }
+        except Exception:
+            token_info = {"parse_error": True}
+
+        # Step 1a: userSites WITHOUT x-country header (correct way per library)
+        sites_result_no_hdr = {}
         site_ref = None
         try:
             sr_data = _frank_request(_QUERY_USER_SITES, {},
-                                     auth_token=auth_token, country=country)
+                                     auth_token=auth_token, country="NL")
             sites = sr_data.get("userSites") or []
             site_ref = sites[0].get("reference") if sites else None
-            sites_result = {
+            sites_result_no_hdr = {
                 "sites_count": len(sites),
                 "site_reference": site_ref,
                 "statuses": [s.get("status") for s in sites],
             }
         except Exception as exc:
-            sites_result = {"error": str(exc)}
+            sites_result_no_hdr = {"error": str(exc)}
+
+        # Step 1b: userSites WITH x-country: BE (old wrong way — for comparison)
+        sites_result_be_hdr = {}
+        try:
+            sr_data2 = _frank_request(_QUERY_USER_SITES, {},
+                                      auth_token=auth_token, country="BE")
+            sites2 = sr_data2.get("userSites") or []
+            sites_result_be_hdr = {
+                "sites_count": len(sites2),
+                "site_reference": sites2[0].get("reference") if sites2 else None,
+            }
+        except Exception as exc:
+            sites_result_be_hdr = {"error": str(exc)}
 
         # Step 2: try periodUsageAndCosts if siteReference found
         period_result = {}
@@ -706,7 +736,9 @@ def frank_consumption_test():
             "country": country,
             "date_tested": str(yesterday),
             "month_tested": str(month_start),
-            "user_sites": sites_result,
+            "token_info": token_info,
+            "user_sites_no_country_hdr": sites_result_no_hdr,
+            "user_sites_be_country_hdr": sites_result_be_hdr,
             "period_usage": period_result,
             "fetch_rows": len(frank_rows),
         })
