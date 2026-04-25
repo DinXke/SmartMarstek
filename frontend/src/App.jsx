@@ -204,6 +204,29 @@ export default function App() {
   const firstWithPhase = Object.values(powerMap).find((p) => p.phaseVoltages);
   const firstWithVolt  = Object.values(powerMap).find((p) => p.acVoltage != null);
 
+  // EnergyMap collapsible state: null = not yet initialised (show expanded during load)
+  const [energyMapExpanded, setEnergyMapExpanded] = useState(() => {
+    const saved = localStorage.getItem("marstek_energymap_expanded");
+    return saved !== null ? saved === "true" : null;
+  });
+
+  // Once devices load for the first time, set default based on count if no saved preference
+  useEffect(() => {
+    if (!loading && energyMapExpanded === null) {
+      setEnergyMapExpanded(devices.length >= 2);
+    }
+  }, [loading, devices.length, energyMapExpanded]);
+
+  const toggleEnergyMap = () => {
+    setEnergyMapExpanded((prev) => {
+      const next = !(prev ?? true);
+      localStorage.setItem("marstek_energymap_expanded", String(next));
+      return next;
+    });
+  };
+
+  const energyMapVisible = energyMapExpanded ?? true;
+
   return (
     <>
       {/* ── Header ── */}
@@ -279,12 +302,21 @@ export default function App() {
             <>
               {/* ── Aggregated home flow ── */}
               <div className="home-flow-card">
-                <div className="home-flow-card-title">⚡ Vermogensbalans</div>
-                <EnergyMap
-                  batteries={homeFlowBatteries}
-                  phaseVoltages={firstWithPhase?.phaseVoltages ?? null}
-                  acVoltage={firstWithVolt?.acVoltage ?? null}
-                />
+                <button
+                  className="home-flow-card-title home-flow-card-toggle"
+                  onClick={toggleEnergyMap}
+                  aria-expanded={energyMapVisible}
+                >
+                  ⚡ Vermogensbalans
+                  <span className={`home-flow-chevron${energyMapVisible ? " home-flow-chevron--open" : ""}`}>›</span>
+                </button>
+                <div className={`home-flow-body${energyMapVisible ? " home-flow-body--open" : ""}`}>
+                  <EnergyMap
+                    batteries={homeFlowBatteries}
+                    phaseVoltages={firstWithPhase?.phaseVoltages ?? null}
+                    acVoltage={firstWithVolt?.acVoltage ?? null}
+                  />
+                </div>
               </div>
 
               {/* ── HomeWizard panel ── */}
