@@ -287,15 +287,35 @@ function SmaScanner({ host }) {
 
       {results !== null && (
         <div>
-          <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 8 }}>
-            {results.length === 0
-              ? "Geen registers met geldige waarden gevonden."
-              : `${results.length} register(s) gevonden:`}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
+              {results.length === 0
+                ? "Geen registers met geldige waarden gevonden."
+                : `${results.length} register(s) gevonden:`}
+            </span>
+            {results.length > 0 && (
+              <button
+                className="btn btn-secondary"
+                style={{ fontSize: 11, padding: "2px 8px" }}
+                onClick={() => {
+                  const header = "Reg,FC,Raw waarde,Hex,Bekende naam";
+                  const rows = results.map(r => `${r.reg},FC0${r.fc},${r.raw},${r.hex},"${r.label || ""}"`);
+                  const csv = [header, ...rows].join("\n");
+                  const blob = new Blob([csv], { type: "text/csv" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url; a.download = "modbus_scan.csv"; a.click();
+                  URL.revokeObjectURL(url);
+                }}
+              >
+                ⬇ Download CSV
+              </button>
+            )}
           </div>
           {results.length > 0 && (
-            <div style={{ overflowX: "auto" }}>
+            <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: 500, border: "1px solid var(--border)", borderRadius: 6 }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "monospace" }}>
-                <thead>
+                <thead style={{ position: "sticky", top: 0, background: "var(--card)", zIndex: 1 }}>
                   <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--text-muted)" }}>
                     <th style={{ textAlign: "left", padding: "4px 8px" }}>Reg</th>
                     <th style={{ textAlign: "left", padding: "4px 8px" }}>FC</th>
