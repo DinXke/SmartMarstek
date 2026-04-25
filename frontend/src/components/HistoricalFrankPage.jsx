@@ -90,17 +90,19 @@ export default function HistoricalFrankPage() {
     setStartDate(addDays(today, -(days - 1)));
   };
 
-  const aggregated = aggregateData(consumption, windowDays);
+  const aggregated = aggregateData(consumption, windowDays).map(c => ({
+    ...c,
+    p1_net_kwh: (c.p1_import_kwh || 0) - (c.p1_export_kwh || 0),
+  }));
   const maxKwh = aggregated.length > 0
-    ? Math.max(0.01, ...aggregated.map(c => Math.max(c.frank_kwh || 0, c.p1_import_kwh || 0)))
+    ? Math.max(0.01, ...aggregated.map(c => Math.max(c.frank_kwh || 0, Math.max(0, c.p1_net_kwh))))
     : 1;
 
-  const totalFrank = aggregated.reduce((s, c) => s + (c.frank_kwh      || 0), 0);
-  const totalCost  = aggregated.reduce((s, c) => s + (c.frank_cost_eur || 0), 0);
-  const totalP1In  = aggregated.reduce((s, c) => s + (c.p1_import_kwh  || 0), 0);
-  const totalP1Out = aggregated.reduce((s, c) => s + (c.p1_export_kwh  || 0), 0);
+  const totalFrank  = aggregated.reduce((s, c) => s + (c.frank_kwh      || 0), 0);
+  const totalCost   = aggregated.reduce((s, c) => s + (c.frank_cost_eur || 0), 0);
+  const totalP1Net  = aggregated.reduce((s, c) => s + c.p1_net_kwh, 0);
 
-  const haP1Data = aggregated.some(c => (c.p1_import_kwh || 0) > 0);
+  const haP1Data = aggregated.some(c => (c.p1_import_kwh || 0) > 0 || (c.p1_export_kwh || 0) > 0);
 
   // Slot width depends on view and whether P1 is present
   const slotMinWidth = windowDays === 1 ? (haP1Data ? 36 : 26) : (haP1Data ? 28 : 20);
@@ -164,7 +166,7 @@ export default function HistoricalFrankPage() {
               {aggregated.map((point, idx) => {
                 const isSelected = selectedIdx === idx;
                 const frankH = Math.max(0, (point.frank_kwh || 0) / maxKwh * 178);
-                const p1H    = Math.max(0, (point.p1_import_kwh || 0) / maxKwh * 178);
+                const p1H    = Math.max(0, point.p1_net_kwh / maxKwh * 178);
                 return (
                   <div key={idx}
                     onClick={() => setSelectedIdx(isSelected ? null : idx)}
@@ -189,7 +191,7 @@ export default function HistoricalFrankPage() {
                         <div style={{
                           flex: 1,
                           height: `${p1H}px`,
-                          minHeight: point.p1_import_kwh > 0 ? 2 : 0,
+                          minHeight: point.p1_net_kwh > 0 ? 2 : 0,
                           background: isSelected ? "#d97706" : "#f59e0b",
                           borderRadius: "3px 3px 0 0",
                           transition: "background 0.1s",
@@ -218,7 +220,7 @@ export default function HistoricalFrankPage() {
               {haP1Data && (
                 <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   <span style={{ width: 10, height: 10, borderRadius: 2, background: "#f59e0b", display: "inline-block" }} />
-                  P1 import
+                  P1 netto (import − export)
                 </span>
               )}
             </div>
@@ -249,16 +251,24 @@ export default function HistoricalFrankPage() {
                   <div style={{ padding: "8px 14px" }}>
                     <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 600, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>P1 Meter</div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 20px" }}>
-                      <div style={{ fontSize: 13 }}><span style={{ color: "var(--text-muted)" }}>Import: </span><strong>{(p.p1_import_kwh || 0).toFixed(3)} kWh</strong></div>
-                      {p.p1_export_kwh > 0 && <div style={{ fontSize: 13 }}><span style={{ color: "var(--text-muted)" }}>Export: </span><strong>{(p.p1_export_kwh || 0).toFixed(3)} kWh</strong></div>}
-                      {p.p1_import_kwh > 0 && p.frank_kwh > 0 && (
-                        <div style={{ fontSize: 13 }}><span style={{ color: "var(--text-muted)" }}>Verschil: </span>
-                          <strong style={{ color: Math.abs(p.p1_import_kwh - p.frank_kwh) < 0.05 ? "#10b981" : "#f59e0b" }}>
-                            {(p.p1_import_kwh - p.frank_kwh).toFixed(3)} kWh
-                          </strong>
-                        </div>
-                      )}
-                      {p.p1_import_kwh === 0 && p.p1_export_kwh === 0 && (
+                      {(p.p1_import_kwh > 0 || p.p1_export_kwh > 0) ? (
+                        <>
+                          <div style={{ fontSize: 13 }}><span style={{ color: "var(--text-muted)" }}>Import: </span><strong>{(p.p1_import_kwh || 0).toFixed(3)} kWh</strong></div>
+                          <div style={{ fontSize: 13 }}><span style={{ color: "var(--text-muted)" }}>Export: </span><strong>{(p.p1_export_kwh || 0).toFixed(3)} kWh</strong></div>
+                          <div style={{ fontSize: 13 }}><span style={{ color: "var(--text-muted)" }}>Netto: </span>
+                            <strong style={{ color: p.p1_net_kwh >= 0 ? "var(--text-primary)" : "#10b981" }}>
+                              {p.p1_net_kwh.toFixed(3)} kWh
+                            </strong>
+                          </div>
+                          {p.frank_kwh > 0 && (
+                            <div style={{ fontSize: 13 }}><span style={{ color: "var(--text-muted)" }}>Verschil vs Frank: </span>
+                              <strong style={{ color: Math.abs(p.p1_net_kwh - p.frank_kwh) < 0.05 ? "#10b981" : "#f59e0b" }}>
+                                {(p.p1_net_kwh - p.frank_kwh).toFixed(3)} kWh
+                              </strong>
+                            </div>
+                          )}
+                        </>
+                      ) : (
                         <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>Geen P1 data voor dit uur</div>
                       )}
                     </div>
@@ -272,9 +282,8 @@ export default function HistoricalFrankPage() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8, marginTop: 10 }}>
             {[
               { label: "Frank verbruik", value: `${totalFrank.toFixed(2)} kWh`,  color: "#3b82f6" },
-              ...(totalCost  > 0 ? [{ label: "Frank kosten", value: `€ ${totalCost.toFixed(2)}`,   color: "#8b5cf6" }] : []),
-              ...(totalP1In  > 0 ? [{ label: "P1 import",    value: `${totalP1In.toFixed(2)} kWh`, color: "#f59e0b" }] : []),
-              ...(totalP1Out > 0 ? [{ label: "P1 export",    value: `${totalP1Out.toFixed(2)} kWh`,color: "#10b981" }] : []),
+              ...(totalCost  > 0 ? [{ label: "Frank kosten",  value: `€ ${totalCost.toFixed(2)}`,       color: "#8b5cf6" }] : []),
+              ...(haP1Data   ? [{ label: "P1 netto",          value: `${totalP1Net.toFixed(2)} kWh`,    color: "#f59e0b" }] : []),
             ].map(item => (
               <div key={item.label} style={{
                 background: "var(--card-bg)", border: "1px solid var(--border-color)",
