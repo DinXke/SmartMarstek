@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.27.10] - 2026-04-25
+
+### Added
+- **Modbus scan tabel scrollbaar** ([SCH-737](/SCH/issues/SCH-737)): scanresultaten tabel heeft nu `max-height: 500px` met verticale scroll en sticky header — alle 223+ registers direct zichtbaar.
+- **CSV download knop in Modbus scanner** ([SCH-737](/SCH/issues/SCH-737)): volledige registerlijst exporteerbaar als `modbus_scan.csv` voor offline debugging.
+
 ## [1.27.9] - 2026-04-25
 
 ### Fixed
