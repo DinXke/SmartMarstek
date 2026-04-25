@@ -359,6 +359,34 @@ query ConsumptionElectricity($date: String!) {
 }
 """
 
+_QUERY_USER_SITES = """
+query UserSites {
+  userSites {
+    reference
+    status
+  }
+}
+"""
+
+_QUERY_BE_PERIOD_CONSUMPTION = """
+query PeriodUsageAndCosts($date: String!, $siteReference: String!) {
+  periodUsageAndCosts(date: $date, siteReference: $siteReference) {
+    electricity {
+      items {
+        date
+        from
+        till
+        usage
+        costs
+      }
+    }
+  }
+}
+"""
+
+_be_site_ref_cache: dict = {}
+_be_period_cache: dict = {}
+
 
 def _frank_request(query: str, variables: dict, auth_token: str | None = None,
                    country: str = "NL") -> dict:
@@ -423,19 +451,54 @@ def _fetch_consumption(auth_token: str | None, start: date, end: date,
 
     try:
         if country == "BE":
-            # BE uses same consumptionElectricity query as NL, but with x-country: BE header
-            data = _frank_request(_QUERY_NL_CONSUMPTION,
-                                   {"startDate": str(start), "endDate": str(end)},
-                                   auth_token=auth_token, country="BE")
-            log.info("BE consumption raw data keys: %s", list(data.keys()))
-            rows = data.get("consumptionElectricity") or []
-            if not rows:
-                # Fallback: try legacy BE query structure
-                data2 = _frank_request(_QUERY_BE_CONSUMPTION, {"date": str(start)},
-                                       auth_token=auth_token, country="BE")
-                log.info("BE consumption legacy data keys: %s", list(data2.keys()))
-                consumption = data2.get("consumption") or {}
-                rows = consumption.get("electricity") or []
+            # BE uses periodUsageAndCosts(date, siteReference) — requires userSites lookup first
+            cache_key = auth_token[:16]
+
+            # Get site reference (in-process cache)
+            site_ref = _be_site_ref_cache.get(cache_key)
+            if not site_ref:
+                try:
+                    sr_data = _frank_request(_QUERY_USER_SITES, {},
+                                             auth_token=auth_token, country="BE")
+                    sites = sr_data.get("userSites") or []
+                    site_ref = sites[0].get("reference") if sites else None
+                    if site_ref:
+                        _be_site_ref_cache[cache_key] = site_ref
+                        log.info("BE siteReference: %s", site_ref)
+                    else:
+                        log.warning("BE userSites returned no reference: %s", sites)
+                except Exception as exc:
+                    log.warning("BE userSites error: %s", exc)
+
+            if not site_ref:
+                log.warning("No BE siteReference — cannot fetch consumption")
+                return []
+
+            # periodUsageAndCosts returns a full month; cache per month
+            month_key = f"{start.year}-{start.month:02d}"
+            period_cache_key = f"{cache_key}_{month_key}"
+            if period_cache_key not in _be_period_cache:
+                month_start = date(start.year, start.month, 1)
+                try:
+                    p_data = _frank_request(
+                        _QUERY_BE_PERIOD_CONSUMPTION,
+                        {"date": str(month_start), "siteReference": site_ref},
+                        auth_token=auth_token, country="BE",
+                    )
+                    period = p_data.get("periodUsageAndCosts") or {}
+                    electricity = period.get("electricity") or {}
+                    items = electricity.get("items") or []
+                    log.info("BE period consumption month=%s  items=%d", month_key, len(items))
+                    _be_period_cache[period_cache_key] = items
+                except Exception as exc:
+                    log.warning("BE period consumption month=%s error: %s", month_key, exc)
+                    _be_period_cache[period_cache_key] = []
+
+            all_items = _be_period_cache.get(period_cache_key, [])
+            # Filter to the requested day
+            day_str = str(start)
+            rows = [item for item in all_items
+                    if (item.get("date") or item.get("from", ""))[:10] == day_str]
         else:  # NL
             data = _frank_request(_QUERY_NL_CONSUMPTION,
                                    {"startDate": str(start), "endDate": str(end)},
@@ -595,58 +658,57 @@ def frank_consumption_test():
         log.info("Testing Frank consumption query  country=%s", country)
 
         yesterday = today - timedelta(days=1)
-        results = {}
+        month_start = date(yesterday.year, yesterday.month, 1)
 
-        FRANK_API_URL_BE = "https://graphql.frankenergie.be/"
+        # Step 1: get userSites (needed for BE siteReference)
+        sites_result = {}
+        site_ref = None
+        try:
+            sr_data = _frank_request(_QUERY_USER_SITES, {},
+                                     auth_token=auth_token, country=country)
+            sites = sr_data.get("userSites") or []
+            site_ref = sites[0].get("reference") if sites else None
+            sites_result = {
+                "sites_count": len(sites),
+                "site_reference": site_ref,
+                "statuses": [s.get("status") for s in sites],
+            }
+        except Exception as exc:
+            sites_result = {"error": str(exc)}
 
-        # One simple query to probe each URL — consumptionElectricity is the NL field
-        probe_gql = f'query {{ consumptionElectricity(startDate: "{yesterday}", endDate: "{today}") {{ from till usage }} }}'
-
-        def _try_query(url, gql, hdrs):
+        # Step 2: try periodUsageAndCosts if siteReference found
+        period_result = {}
+        if site_ref:
             try:
-                r = _req.post(url, json={"query": gql}, headers=hdrs, timeout=10)
-                body = r.json()
-                data = body.get("data") or {}
-                errors = body.get("errors") or []
-                first_error = errors[0].get("message") if errors else None
-                return {
-                    "http_status": r.status_code,
-                    "data_keys": list(data.keys()) if isinstance(data, dict) else [],
-                    "error": first_error or data.get("error"),
-                    "raw": str(body)[:300],
+                p_data = _frank_request(
+                    _QUERY_BE_PERIOD_CONSUMPTION,
+                    {"date": str(month_start), "siteReference": site_ref},
+                    auth_token=auth_token, country=country,
+                )
+                period = p_data.get("periodUsageAndCosts") or {}
+                electricity = period.get("electricity") or {}
+                items = electricity.get("items") or []
+                period_result = {
+                    "items_count": len(items),
+                    "first_item": items[0] if items else None,
+                    "last_item": items[-1] if items else None,
                 }
             except Exception as exc:
-                return {"error": str(exc)}
+                period_result = {"error": str(exc)}
+        else:
+            period_result = {"skipped": "no siteReference"}
 
-        headers_nl = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {auth_token}",
-            "x-graphql-client-name": "frank-app",
-            "x-graphql-client-version": "4.13.3",
-            "skip-graphcdn": "1",
-        }
-        headers_be = {**headers_nl, "x-country": "BE"}
-
-        # Test both API URLs with the same query
-        url_results = {
-            "nl_url_no_country_hdr": _try_query(FRANK_API_URL, probe_gql, headers_nl),
-            "nl_url_be_country_hdr": _try_query(FRANK_API_URL, probe_gql, headers_be),
-            "be_url_no_country_hdr": _try_query(FRANK_API_URL_BE, probe_gql, headers_nl),
-            "be_url_be_country_hdr": _try_query(FRANK_API_URL_BE, probe_gql, headers_be),
-        }
-
-        # Also probe with a simple __typename query to see if the BE URL is reachable
-        typename_gql = "query { __typename }"
-        url_results["be_url_typename"] = _try_query(FRANK_API_URL_BE, typename_gql, headers_be)
-
-        frank_rows = _fetch_consumption(auth_token, today, tomorrow, country)
+        # Step 3: run the actual _fetch_consumption to show end-to-end result
+        frank_rows = _fetch_consumption(auth_token, yesterday, today, country)
 
         return jsonify({
             "status": "ok",
             "country": country,
             "date_tested": str(yesterday),
-            "rows_returned": len(frank_rows),
-            "url_tests": url_results,
+            "month_tested": str(month_start),
+            "user_sites": sites_result,
+            "period_usage": period_result,
+            "fetch_rows": len(frank_rows),
         })
     except Exception as exc:
         log.error("Frank consumption test error: %s", exc, exc_info=True)
