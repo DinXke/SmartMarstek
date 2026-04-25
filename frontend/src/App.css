@@ -2449,6 +2449,17 @@ html, body {
   color: var(--accent);
 }
 
+/* =========================================================
+   UI Version gating (data-ui="old" | data-ui="new")
+   Placeholder selectors — add New UI overrides under [data-ui="new"]
+   ========================================================= */
+
+/* stylelint-disable-next-line block-no-empty */
+[data-ui="old"] {}
+
+/* stylelint-disable-next-line block-no-empty */
+[data-ui="new"] {}
+
 /* InfluxDB multi-battery entries */
 .influx-multi-entries {
   display: flex;

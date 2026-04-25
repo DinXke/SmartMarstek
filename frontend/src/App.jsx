@@ -38,6 +38,17 @@ function useViewMode() {
   return [mode, setMode];
 }
 
+function useUiVersion() {
+  const [version, setVersion] = useState(
+    () => localStorage.getItem("marstek_ui") || "old"
+  );
+  useEffect(() => {
+    document.documentElement.setAttribute("data-ui", version);
+    localStorage.setItem("marstek_ui", version);
+  }, [version]);
+  return [version, setVersion];
+}
+
 function ViewToggle() {
   const [mode, setMode] = useViewMode();
   const isMobile = mode === "mobile";
@@ -49,6 +60,21 @@ function ViewToggle() {
       style={{ gap: 4, fontSize: 12 }}
     >
       {isMobile ? "🖥️" : "📱"}
+    </button>
+  );
+}
+
+function UiVersionToggle() {
+  const [version, setVersion] = useUiVersion();
+  const isNew = version === "new";
+  return (
+    <button
+      className="btn btn-ghost btn-sm"
+      onClick={() => setVersion(isNew ? "old" : "new")}
+      title={isNew ? "Schakel naar Old UI" : "Schakel naar New UI"}
+      style={{ gap: 4, fontSize: 12 }}
+    >
+      {isNew ? "🆕" : "🕹️"} {isNew ? "New UI" : "Old UI"}
     </button>
   );
 }
@@ -80,12 +106,14 @@ const NAV_ITEMS = [
 ];
 
 export default function App() {
-  // Apply saved theme + view mode immediately on mount
+  // Apply saved theme + view mode + ui version immediately on mount
   useEffect(() => {
     const theme = localStorage.getItem("marstek_theme") || "dark";
     document.documentElement.setAttribute("data-theme", theme);
     const view = localStorage.getItem("marstek_view") || "desktop";
     document.documentElement.setAttribute("data-view", view);
+    const ui = localStorage.getItem("marstek_ui") || "old";
+    document.documentElement.setAttribute("data-ui", ui);
   }, []);
   const [page, setPage]       = useState("batteries");
   const [devices, setDevices] = useState([]);
@@ -162,6 +190,7 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <ViewToggle />
           <ThemeToggle />
+          <UiVersionToggle />
           {page === "batteries" && (
             <button className="btn btn-primary btn--add-desktop" onClick={() => setShowAdd(true)}>
               + Toevoegen
